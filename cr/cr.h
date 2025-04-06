@@ -1137,7 +1137,7 @@ static so_handle cr_so_load(const std::string &filename) {
     CR_WINDOWS_ConvertPath(_filename, filename);
     auto new_dll = LoadLibrary(_filename.c_str());
     if (!new_dll) {
-        CR_ERROR("Couldn't load plugin: %d\n", GetLastError());
+        CR_ERROR("Couldn't load plugin: %ld\n", GetLastError());
     }
     return new_dll;
 }
@@ -1146,7 +1146,7 @@ static cr_plugin_main_func cr_so_symbol(so_handle handle) {
     CR_ASSERT(handle);
     auto new_main = (cr_plugin_main_func)(void*)GetProcAddress(handle, CR_MAIN_FUNC);
     if (!new_main) {
-        CR_ERROR("Couldn't find plugin entry point: %d\n",
+        CR_ERROR("Couldn't find plugin entry point: %ld\n",
                 GetLastError());
     }
     return new_main;
