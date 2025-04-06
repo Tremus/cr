@@ -696,33 +696,27 @@ static int cr_version_path(const char* basepath, unsigned version, char* outbuf,
     return snprintf(outbuf, outbuflen, "%.*s%u%s", (int)(ext - basepath), basepath, version, ext);
 }
 
-namespace cr_plugin_section_type
+typedef enum CRSectionType
 {
-enum e
-{
-    state,
-    bss,
-    count
-};
-}
+    CR_SECTION_TYPE_STATE,
+    CR_SECTION_TYPE_BSS,
+    CR_SECTION_TYPE_COUNT,
+} CRSectionType;
 
-namespace cr_plugin_section_version
+typedef enum CRSectionVersion
 {
-enum e
-{
-    backup,
-    current,
-    count
-};
-}
+    CR_SECTION_VERSION_BACKUP,
+    CR_SECTION_VERSION_CURRENT,
+    CR_SECTION_VERSION_COUNT,
+} CRSectionVersion;
 
 struct cr_plugin_section
 {
-    cr_plugin_section_type::e type = {};
-    intptr_t                  base = 0;
-    char*                     ptr  = 0;
-    int64_t                   size = 0;
-    void*                     data = nullptr;
+    CRSectionType type = {};
+    intptr_t      base = 0;
+    char*         ptr  = 0;
+    int64_t       size = 0;
+    void*         data = nullptr;
 };
 
 struct cr_plugin_segment
@@ -736,17 +730,16 @@ struct cr_plugin_segment
 struct cr_internal
 {
     char                filepath[1024];
-    time_t              timestamp                                                             = {};
-    void*               handle                                                                = nullptr;
-    cr_plugin_main_func main                                                                  = nullptr;
-    cr_plugin_segment   seg                                                                   = {};
-    cr_plugin_section   data[cr_plugin_section_type::count][cr_plugin_section_version::count] = {};
-    cr_mode             mode                                                                  = CR_SAFEST;
+    time_t              timestamp                                             = {};
+    void*               handle                                                = nullptr;
+    cr_plugin_main_func main                                                  = nullptr;
+    cr_plugin_segment   seg                                                   = {};
+    cr_plugin_section   data[CR_SECTION_TYPE_COUNT][CR_SECTION_VERSION_COUNT] = {};
+    cr_mode             mode                                                  = CR_SAFEST;
 };
 
-static bool
-cr_plugin_section_validate(cr_plugin& ctx, cr_plugin_section_type::e type, intptr_t vaddr, intptr_t ptr, int64_t size);
-static void cr_plugin_sections_reload(cr_plugin& ctx, cr_plugin_section_version::e version);
+static bool cr_plugin_section_validate(cr_plugin& ctx, CRSectionType type, intptr_t vaddr, intptr_t ptr, int64_t size);
+static void cr_plugin_sections_reload(cr_plugin& ctx, CRSectionVersion version);
 static void cr_plugin_sections_store(cr_plugin& ctx);
 static void cr_plugin_sections_backup(cr_plugin& ctx);
 static void cr_plugin_reload(cr_plugin& ctx);
@@ -1135,16 +1128,12 @@ bool static cr_pdb_process(const char* next_path_dll)
 }
 #endif // _MSC_VER
 
-static void cr_pe_section_save(
-    cr_plugin&                  ctx,
-    cr_plugin_section_type::e   type,
-    int64_t                     vaddr,
-    int64_t                     base,
-    const IMAGE_SECTION_HEADER* shdr)
+static void
+cr_pe_section_save(cr_plugin& ctx, CRSectionType type, int64_t vaddr, int64_t base, const IMAGE_SECTION_HEADER* shdr)
 {
-    const cr_plugin_section_version::e version = cr_plugin_section_version::current;
-    cr_internal*                       p       = (cr_internal*)ctx.p;
-    cr_plugin_section*                 data    = &p->data[type][version];
+    const CRSectionVersion version = CR_SECTION_VERSION_CURRENT;
+    cr_internal*           p       = (cr_internal*)ctx.p;
+    cr_plugin_section*     data    = &p->data[type][version];
 
     const size_t old_size = data->size;
     data->base            = base;
@@ -1180,14 +1169,14 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
             {
                 result &= cr_plugin_section_validate(
                     ctx,
-                    cr_plugin_section_type::state,
+                    CR_SECTION_TYPE_STATE,
                     base + sectionHeader->VirtualAddress,
                     base,
                     size);
             }
             if (result)
             {
-                cr_plugin_section_type::e sec = cr_plugin_section_type::state;
+                CRSectionType sec = CR_SECTION_TYPE_STATE;
                 cr_pe_section_save(ctx, sec, base + sectionHeader->VirtualAddress, base, sectionHeader);
             }
         }
@@ -1197,14 +1186,14 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
             {
                 result &= cr_plugin_section_validate(
                     ctx,
-                    cr_plugin_section_type::bss,
+                    CR_SECTION_TYPE_BSS,
                     base + sectionHeader->VirtualAddress,
                     base,
                     size);
             }
             if (result)
             {
-                cr_plugin_section_type::e sec = cr_plugin_section_type::bss;
+                CRSectionType sec = CR_SECTION_TYPE_BSS;
                 cr_pe_section_save(ctx, sec, base + sectionHeader->VirtualAddress, base, sectionHeader);
             }
         }
@@ -1472,7 +1461,7 @@ static size_t cr_file_size(const std::string& path)
 template <class H>
 void cr_elf_section_save(cr_plugin& ctx, cr_plugin_section_type::e type, int64_t vaddr, int64_t base, H shdr)
 {
-    const auto   version  = cr_plugin_section_version::current;
+    const auto   version  = CR_SECTION_VERSION_CURRENT;
     auto         p        = (cr_internal*)ctx.p;
     auto         data     = &p->data[type][version];
     const size_t old_size = data->size;
@@ -1508,7 +1497,7 @@ bool cr_elf_validate_sections(cr_plugin& ctx, bool rollback, H shdr, int shnum, 
         if (!strcmp(name, ".state"))
         {
             const int64_t vaddr = base - size;
-            auto          sec   = cr_plugin_section_type::state;
+            auto          sec   = CR_SECTION_TYPE_STATE;
             if (ctx.version || rollback)
             {
                 result &= cr_plugin_section_validate(ctx, sec, vaddr, addr, size);
@@ -1522,7 +1511,7 @@ bool cr_elf_validate_sections(cr_plugin& ctx, bool rollback, H shdr, int shnum, 
         {
             // .bss goes past segment filesz, but it may be just padding
             const int64_t vaddr = base;
-            auto          sec   = cr_plugin_section_type::bss;
+            auto          sec   = CR_SECTION_TYPE_BSS;
             if (ctx.version || rollback)
             {
                 // this is kinda hack to skip bss validation if our data is zero
@@ -1672,7 +1661,7 @@ typedef struct mach_header macho_hdr;
 // vaddr = is the in memory loaded address of the segment-section
 void cr_macho_section_save(cr_plugin& ctx, cr_plugin_section_type::e type, intptr_t addr, size_t size)
 {
-    const auto   version  = cr_plugin_section_version::current;
+    const auto   version  = CR_SECTION_VERSION_CURRENT;
     auto         p        = (cr_internal*)ctx.p;
     auto         data     = &p->data[type][version];
     const size_t old_size = data->size;
@@ -1757,11 +1746,11 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
         auto          mhdr = (macho_hdr*)hdr;
         unsigned long size = 0;
         auto          ptr  = (intptr_t)getsectiondata(mhdr, SEG_DATA, "__bss", &size);
-        validate_and_save(cr_plugin_section_type::bss, ptr, (size_t)size);
+        validate_and_save(CR_SECTION_TYPE_BSS, ptr, (size_t)size);
         if (result)
         {
             ptr = (intptr_t)getsectiondata(mhdr, SEG_DATA, "__state", &size);
-            validate_and_save(cr_plugin_section_type::state, ptr, (size_t)size);
+            validate_and_save(CR_SECTION_TYPE_STATE, ptr, (size_t)size);
         }
         break;
     }
@@ -1955,11 +1944,11 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
 
         if (rollback)
         {
-            cr_plugin_sections_reload(ctx, cr_plugin_section_version::backup);
+            cr_plugin_sections_reload(ctx, CR_SECTION_VERSION_BACKUP);
         }
         else if (ctx.version)
         {
-            cr_plugin_sections_reload(ctx, cr_plugin_section_version::current);
+            cr_plugin_sections_reload(ctx, CR_SECTION_VERSION_CURRENT);
         }
 
         cr_plugin_main_func new_main = cr_so_symbol(new_dll);
@@ -1986,8 +1975,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
     return true;
 }
 
-static bool
-cr_plugin_section_validate(cr_plugin& ctx, cr_plugin_section_type::e type, intptr_t ptr, intptr_t base, int64_t size)
+static bool cr_plugin_section_validate(cr_plugin& ctx, CRSectionType type, intptr_t ptr, intptr_t base, int64_t size)
 {
     CR_TRACE(void) ptr;
     cr_internal* p = (cr_internal*)ctx.p;
@@ -2016,12 +2004,12 @@ static void cr_plugin_sections_backup(cr_plugin& ctx)
     }
     CR_TRACE
 
-    for (int i = 0; i < cr_plugin_section_type::count; ++i)
+    for (int i = 0; i < CR_SECTION_TYPE_COUNT; ++i)
     {
-        cr_plugin_section* cur = &p->data[i][cr_plugin_section_version::current];
+        cr_plugin_section* cur = &p->data[i][CR_SECTION_VERSION_CURRENT];
         if (cur->ptr)
         {
-            cr_plugin_section* bkp = &p->data[i][cr_plugin_section_version::backup];
+            cr_plugin_section* bkp = &p->data[i][CR_SECTION_VERSION_BACKUP];
             bkp->data              = CR_REALLOC(bkp->data, cur->size);
             bkp->ptr               = cur->ptr;
             bkp->size              = cur->size;
@@ -2050,8 +2038,8 @@ static void cr_plugin_sections_store(cr_plugin& ctx)
     }
     CR_TRACE
 
-    cr_plugin_section_version::e version = cr_plugin_section_version::current;
-    for (int i = 0; i < cr_plugin_section_type::count; ++i)
+    CRSectionVersion version = CR_SECTION_VERSION_CURRENT;
+    for (int i = 0; i < CR_SECTION_TYPE_COUNT; ++i)
     {
         if (p->data[i][version].ptr && p->data[i][version].data)
         {
@@ -2067,9 +2055,9 @@ static void cr_plugin_sections_store(cr_plugin& ctx)
 // internal
 // After a load happens reload the global state from previous version from our
 // internal copy created during the unload step.
-static void cr_plugin_sections_reload(cr_plugin& ctx, cr_plugin_section_version::e version)
+static void cr_plugin_sections_reload(cr_plugin& ctx, CRSectionVersion version)
 {
-    CR_ASSERT(version < cr_plugin_section_version::count);
+    CR_ASSERT(version < CR_SECTION_VERSION_COUNT);
     cr_internal* p = (cr_internal*)ctx.p;
     if (p->mode == CR_DISABLE)
     {
@@ -2077,14 +2065,14 @@ static void cr_plugin_sections_reload(cr_plugin& ctx, cr_plugin_section_version:
     }
     CR_TRACE
 
-    for (int i = 0; i < cr_plugin_section_type::count; ++i)
+    for (int i = 0; i < CR_SECTION_TYPE_COUNT; ++i)
     {
         if (p->data[i][version].data)
         {
             const int64_t len = p->data[i][version].size;
             // restore backup into the current section address as it may
             // change due aslr and backup address may be invalid
-            const cr_plugin_section_version::e current = cr_plugin_section_version::current;
+            const CRSectionVersion current = CR_SECTION_VERSION_CURRENT;
 
             void* dest = (void*)p->data[i][current].ptr;
             if (dest)
@@ -2100,9 +2088,9 @@ static void cr_so_sections_free(cr_plugin& ctx)
 {
     CR_TRACE
     cr_internal* p = (cr_internal*)ctx.p;
-    for (int i = 0; i < cr_plugin_section_type::count; ++i)
+    for (int i = 0; i < CR_SECTION_TYPE_COUNT; ++i)
     {
-        for (int v = 0; v < cr_plugin_section_version::count; ++v)
+        for (int v = 0; v < CR_SECTION_VERSION_COUNT; ++v)
         {
             if (p->data[i][v].data)
             {
