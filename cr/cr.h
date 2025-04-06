@@ -551,9 +551,9 @@ enum cr_failure
     CR_USER = 0x100,
 };
 
-struct cr_plugin;
+typedef struct cr_plugin cr_plugin;
 
-typedef int (*cr_plugin_main_func)(struct cr_plugin* ctx, enum cr_op operation);
+typedef int (*cr_plugin_main_func)(cr_plugin* ctx, enum cr_op operation);
 
 // public interface for the plugin context, this has some user facing
 // variables that may be used to manage reload feedback.
@@ -656,6 +656,7 @@ struct cr_plugin
 #define CR_OP_MODE CR_HOST
 #endif
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #if defined(_WIN32)
@@ -710,43 +711,44 @@ typedef enum CRSectionVersion
     CR_SECTION_VERSION_COUNT,
 } CRSectionVersion;
 
-struct cr_plugin_section
+typedef struct cr_plugin_section
 {
-    CRSectionType type = {};
-    intptr_t      base = 0;
-    char*         ptr  = 0;
-    int64_t       size = 0;
-    void*         data = nullptr;
-};
+    CRSectionType type;
+    intptr_t      base;
+    char*         ptr;
+    int64_t       size;
+    void*         data;
+} cr_plugin_section;
 
-struct cr_plugin_segment
+typedef struct cr_plugin_segment
 {
-    char*   ptr  = 0;
-    int64_t size = 0;
-};
+    char*   ptr;
+    int64_t size;
+} cr_plugin_segment;
 
 // keep track of some internal state about the plugin, should not be messed
 // with by user
-struct cr_internal
+typedef struct cr_internal
 {
-    char                filepath[1024];
-    time_t              timestamp                                             = {};
-    void*               handle                                                = nullptr;
-    cr_plugin_main_func main                                                  = nullptr;
-    cr_plugin_segment   seg                                                   = {};
-    cr_plugin_section   data[CR_SECTION_TYPE_COUNT][CR_SECTION_VERSION_COUNT] = {};
-    cr_mode             mode                                                  = CR_SAFEST;
-};
+    char    filepath[1024];
+    int64_t timestamp;
+    void*   handle;
 
-static bool cr_plugin_section_validate(cr_plugin& ctx, CRSectionType type, intptr_t vaddr, intptr_t ptr, int64_t size);
-static void cr_plugin_sections_reload(cr_plugin& ctx, CRSectionVersion version);
-static void cr_plugin_sections_store(cr_plugin& ctx);
-static void cr_plugin_sections_backup(cr_plugin& ctx);
-static void cr_plugin_reload(cr_plugin& ctx);
-static int  cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close);
-static bool cr_plugin_changed(cr_plugin& ctx);
-static bool cr_plugin_rollback(cr_plugin& ctx);
-static int  cr_plugin_main(cr_plugin& ctx, cr_op operation);
+    cr_plugin_main_func main;
+    cr_plugin_segment   seg;
+    cr_plugin_section   data[CR_SECTION_TYPE_COUNT][CR_SECTION_VERSION_COUNT];
+    enum cr_mode        mode;
+} cr_internal;
+
+static bool cr_plugin_section_validate(cr_plugin* ctx, CRSectionType type, intptr_t vaddr, intptr_t ptr, int64_t size);
+static void cr_plugin_sections_reload(cr_plugin* ctx, CRSectionVersion version);
+static void cr_plugin_sections_store(cr_plugin* ctx);
+static void cr_plugin_sections_backup(cr_plugin* ctx);
+static void cr_plugin_reload(cr_plugin* ctx);
+static int  cr_plugin_unload(cr_plugin* ctx, bool rollback, bool close);
+static bool cr_plugin_changed(cr_plugin* ctx);
+static bool cr_plugin_rollback(cr_plugin* ctx);
+static int  cr_plugin_main(cr_plugin* ctx, enum cr_op operation);
 
 #if defined(_WIN32)
 
@@ -763,7 +765,7 @@ static int  cr_plugin_main(cr_plugin& ctx, cr_op operation);
 #if defined(_MSC_VER)
 #pragma comment(lib, "dbghelp.lib")
 #endif
-using so_handle = HMODULE;
+typedef HMODULE so_handle;
 
 static int cr_windows_convert_path(const char* in, wchar_t* out)
 {
@@ -774,7 +776,7 @@ static int cr_windows_convert_path(const char* in, wchar_t* out)
     return num;
 }
 
-static time_t cr_last_write_time(const char* path)
+static int64_t cr_last_write_time(const char* path)
 {
     WCHAR wpath[MAX_PATH];
     cr_windows_convert_path(path, wpath);
@@ -794,7 +796,7 @@ static time_t cr_last_write_time(const char* path)
     time.HighPart = fad.ftLastWriteTime.dwHighDateTime;
     time.LowPart  = fad.ftLastWriteTime.dwLowDateTime;
 
-    return static_cast<time_t>(time.QuadPart / 10000000 - 11644473600LL);
+    return (int64_t)(time.QuadPart / 10000000 - 11644473600LL);
 }
 
 static bool cr_exists(const char* path)
@@ -834,43 +836,40 @@ static void cr_del(const char* path)
 #include <stdio.h>
 #include <tchar.h>
 
-template <class T>
-static T struct_cast(void* ptr, LONG offset = 0)
-{
-    return reinterpret_cast<T>(reinterpret_cast<intptr_t>(ptr) + offset);
-}
+static void* struct_cast(void* ptr, LONG offset) { return (void*)((intptr_t)(ptr) + offset); }
 
 // RSDS Debug Information for PDB files
-using DebugInfoSignature = DWORD;
+// using DebugInfoSignature = DWORD;
+typedef DWORD DebugInfoSignature;
 #define CR_RSDS_SIGNATURE 'SDSR'
-struct cr_rsds_hdr
+typedef struct cr_rsds_hdr
 {
     DebugInfoSignature signature;
     GUID               guid;
     long               version;
     char               filename[1];
-};
+} cr_rsds_hdr;
 
-static bool cr_pe_debugdir_rva(PIMAGE_OPTIONAL_HEADER optionalHeader, DWORD& debugDirRva, DWORD& debugDirSize)
+static bool cr_pe_debugdir_rva(PIMAGE_OPTIONAL_HEADER optionalHeader, DWORD* debugDirRva, DWORD* debugDirSize)
 {
     if (optionalHeader->Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
     {
-        _IMAGE_OPTIONAL_HEADER64* optionalHeader64 = struct_cast<PIMAGE_OPTIONAL_HEADER64>(optionalHeader);
-        debugDirRva  = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
-        debugDirSize = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+        PIMAGE_OPTIONAL_HEADER64 optionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)(optionalHeader);
+        *debugDirRva  = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
+        *debugDirSize = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
     }
     else
     {
-        _IMAGE_OPTIONAL_HEADER* optionalHeader32 = struct_cast<PIMAGE_OPTIONAL_HEADER32>(optionalHeader);
-        debugDirRva  = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
-        debugDirSize = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+        PIMAGE_OPTIONAL_HEADER32 optionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)(optionalHeader);
+        *debugDirRva  = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
+        *debugDirSize = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
     }
 
-    if (debugDirRva == 0 && debugDirSize == 0)
+    if (*debugDirRva == 0 && *debugDirSize == 0)
     {
         return true;
     }
-    else if (debugDirRva == 0 || debugDirSize == 0)
+    else if (*debugDirRva == 0 || *debugDirSize == 0)
     {
         return false;
     }
@@ -878,10 +877,10 @@ static bool cr_pe_debugdir_rva(PIMAGE_OPTIONAL_HEADER optionalHeader, DWORD& deb
     return true;
 }
 
-static bool cr_pe_fileoffset_rva(PIMAGE_NT_HEADERS ntHeaders, DWORD rva, DWORD& fileOffset)
+static bool cr_pe_fileoffset_rva(PIMAGE_NT_HEADERS ntHeaders, DWORD rva, DWORD* fileOffset)
 {
-    bool                   found         = false;
-    _IMAGE_SECTION_HEADER* sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
+    bool                  found         = false;
+    PIMAGE_SECTION_HEADER sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
     for (int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, sectionHeader++)
     {
         DWORD sectionSize = sectionHeader->Misc.VirtualSize;
@@ -897,8 +896,8 @@ static bool cr_pe_fileoffset_rva(PIMAGE_NT_HEADERS ntHeaders, DWORD rva, DWORD& 
         return false;
     }
 
-    const int diff = static_cast<int>(sectionHeader->VirtualAddress - sectionHeader->PointerToRawData);
-    fileOffset     = rva - diff;
+    const int diff = (int)(sectionHeader->VirtualAddress - sectionHeader->PointerToRawData);
+    *fileOffset    = rva - diff;
     return true;
 }
 
@@ -909,17 +908,17 @@ static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
     const DWORD debugInfoSize = debugDir->SizeOfData;
     if (debugInfo == 0 || debugInfoSize == 0)
     {
-        return nullptr;
+        return NULL;
     }
 
     if (IsBadReadPtr(debugInfo, debugInfoSize))
     {
-        return nullptr;
+        return NULL;
     }
 
     if (debugInfoSize < sizeof(DebugInfoSignature))
     {
-        return nullptr;
+        return NULL;
     }
 
     if (debugDir->Type == IMAGE_DEBUG_TYPE_CODEVIEW)
@@ -930,19 +929,19 @@ static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
             cr_rsds_hdr* info = (cr_rsds_hdr*)(debugInfo);
             if (IsBadReadPtr(debugInfo, sizeof(cr_rsds_hdr)))
             {
-                return nullptr;
+                return NULL;
             }
 
             if (IsBadStringPtrA((const char*)info->filename, UINT_MAX))
             {
-                return nullptr;
+                return NULL;
             }
 
             return info->filename;
         }
     }
 
-    return nullptr;
+    return NULL;
 }
 
 static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char orig_pdb[MAX_PATH])
@@ -950,8 +949,8 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
     WCHAR wpath[MAX_PATH];
     cr_windows_convert_path(next_path_dll, wpath);
 
-    HANDLE fp      = nullptr;
-    HANDLE filemap = nullptr;
+    HANDLE fp      = NULL;
+    HANDLE filemap = NULL;
     LPVOID mem     = 0;
     bool   result  = false;
     do
@@ -960,28 +959,28 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
             wpath,
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ,
-            nullptr,
+            NULL,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if ((fp == INVALID_HANDLE_VALUE) || (fp == nullptr))
+            NULL);
+        if ((fp == INVALID_HANDLE_VALUE) || (fp == NULL))
         {
             break;
         }
 
-        filemap = CreateFileMappingW(fp, nullptr, PAGE_READWRITE, 0, 0, nullptr);
-        if (filemap == nullptr)
+        filemap = CreateFileMappingW(fp, NULL, PAGE_READWRITE, 0, 0, NULL);
+        if (filemap == NULL)
         {
             break;
         }
 
         mem = MapViewOfFile(filemap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-        if (mem == nullptr)
+        if (mem == NULL)
         {
             break;
         }
 
-        _IMAGE_DOS_HEADER* dosHeader = struct_cast<PIMAGE_DOS_HEADER>(mem);
+        PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)(mem);
         if (dosHeader == 0)
         {
             break;
@@ -997,7 +996,7 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
             break;
         }
 
-        _IMAGE_NT_HEADERS64* ntHeaders = struct_cast<PIMAGE_NT_HEADERS>(dosHeader, dosHeader->e_lfanew);
+        PIMAGE_NT_HEADERS ntHeaders = struct_cast(dosHeader, dosHeader->e_lfanew);
         if (ntHeaders == 0)
         {
             break;
@@ -1029,7 +1028,7 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
             break;
         }
 
-        _IMAGE_SECTION_HEADER* sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
+        PIMAGE_SECTION_HEADER sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
         if (IsBadReadPtr(sectionHeaders, ntHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)))
         {
             break;
@@ -1037,7 +1036,7 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
 
         DWORD debugDirRva  = 0;
         DWORD debugDirSize = 0;
-        if (!cr_pe_debugdir_rva(&ntHeaders->OptionalHeader, debugDirRva, debugDirSize))
+        if (!cr_pe_debugdir_rva(&ntHeaders->OptionalHeader, &debugDirRva, &debugDirSize))
         {
             break;
         }
@@ -1048,12 +1047,12 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
         }
 
         DWORD debugDirOffset = 0;
-        if (!cr_pe_fileoffset_rva(ntHeaders, debugDirRva, debugDirOffset))
+        if (!cr_pe_fileoffset_rva(ntHeaders, debugDirRva, &debugDirOffset))
         {
             break;
         }
 
-        _IMAGE_DEBUG_DIRECTORY* debugDir = struct_cast<PIMAGE_DEBUG_DIRECTORY>(mem, debugDirOffset);
+        PIMAGE_DEBUG_DIRECTORY debugDir = struct_cast(mem, debugDirOffset);
         if (debugDir == 0)
         {
             break;
@@ -1094,17 +1093,17 @@ static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char 
     }
     while (0);
 
-    if (mem != nullptr)
+    if (mem != NULL)
     {
         UnmapViewOfFile(mem);
     }
 
-    if (filemap != nullptr)
+    if (filemap != NULL)
     {
         CloseHandle(filemap);
     }
 
-    if ((fp != nullptr) && (fp != INVALID_HANDLE_VALUE))
+    if ((fp != NULL) && (fp != INVALID_HANDLE_VALUE))
     {
         CloseHandle(fp);
     }
@@ -1129,10 +1128,10 @@ bool static cr_pdb_process(const char* next_path_dll)
 #endif // _MSC_VER
 
 static void
-cr_pe_section_save(cr_plugin& ctx, CRSectionType type, int64_t vaddr, int64_t base, const IMAGE_SECTION_HEADER* shdr)
+cr_pe_section_save(cr_plugin* ctx, CRSectionType type, int64_t vaddr, int64_t base, const IMAGE_SECTION_HEADER* shdr)
 {
     const CRSectionVersion version = CR_SECTION_VERSION_CURRENT;
-    cr_internal*           p       = (cr_internal*)ctx.p;
+    cr_internal*           p       = (cr_internal*)ctx->p;
     cr_plugin_section*     data    = &p->data[type][version];
 
     const size_t old_size = data->size;
@@ -1146,16 +1145,16 @@ cr_pe_section_save(cr_plugin& ctx, CRSectionType type, int64_t vaddr, int64_t ba
     }
 }
 
-static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const char* imagefile, bool rollback)
+static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const char* imagefile, bool rollback)
 {
     (void)imagefile;
     CR_ASSERT(handle);
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     if (p->mode == CR_DISABLE)
     {
         return true;
     }
-    _IMAGE_NT_HEADERS64*  ntHeaders      = ImageNtHeader(handle);
+    PIMAGE_NT_HEADERS     ntHeaders      = ImageNtHeader(handle);
     ULONGLONG             base           = ntHeaders->OptionalHeader.ImageBase;
     IMAGE_SECTION_HEADER* sectionHeaders = (IMAGE_SECTION_HEADER*)(ntHeaders + 1);
     bool                  result         = true;
@@ -1165,7 +1164,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
         const int64_t               size          = sectionHeader->SizeOfRawData;
         if (!strcmp((const char*)sectionHeader->Name, ".state"))
         {
-            if (ctx.version || rollback)
+            if (ctx->version || rollback)
             {
                 result &= cr_plugin_section_validate(
                     ctx,
@@ -1182,7 +1181,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
         }
         else if (!strcmp((const char*)sectionHeader->Name, ".bss"))
         {
-            if (ctx.version || rollback)
+            if (ctx->version || rollback)
             {
                 result &= cr_plugin_section_validate(
                     ctx,
@@ -1201,9 +1200,9 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
     return result;
 }
 
-static void cr_so_unload(cr_plugin& ctx)
+static void cr_so_unload(cr_plugin* ctx)
 {
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     CR_ASSERT(p->handle);
     FreeLibrary((HMODULE)p->handle);
 }
@@ -1264,30 +1263,30 @@ static void cr_plat_init()
 #endif
 }
 
-static int cr_seh_filter(cr_plugin& ctx, unsigned long seh)
+static int cr_seh_filter(cr_plugin* ctx, unsigned long seh)
 {
-    if (ctx.version == 1)
+    if (ctx->version == 1)
     {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    ctx.version = ctx.last_working_version;
+    ctx->version = ctx->last_working_version;
     switch (seh)
     {
     case EXCEPTION_ACCESS_VIOLATION:
-        ctx.failure = CR_SEGFAULT;
+        ctx->failure = CR_SEGFAULT;
         return EXCEPTION_EXECUTE_HANDLER;
     case EXCEPTION_ILLEGAL_INSTRUCTION:
-        ctx.failure = CR_ILLEGAL;
+        ctx->failure = CR_ILLEGAL;
         return EXCEPTION_EXECUTE_HANDLER;
     case EXCEPTION_DATATYPE_MISALIGNMENT:
-        ctx.failure = CR_MISALIGN;
+        ctx->failure = CR_MISALIGN;
         return EXCEPTION_EXECUTE_HANDLER;
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
-        ctx.failure = CR_BOUNDS;
+        ctx->failure = CR_BOUNDS;
         return EXCEPTION_EXECUTE_HANDLER;
     case EXCEPTION_STACK_OVERFLOW:
-        ctx.failure = CR_STACKOVERFLOW;
+        ctx->failure = CR_STACKOVERFLOW;
         return EXCEPTION_EXECUTE_HANDLER;
     default:
         break;
@@ -1295,9 +1294,9 @@ static int cr_seh_filter(cr_plugin& ctx, unsigned long seh)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
+static int cr_plugin_main(cr_plugin* ctx, enum cr_op operation)
 {
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
 #if !defined(__MINGW32__)
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -1307,7 +1306,7 @@ static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
     {
         if (p->main)
         {
-            return p->main(&ctx, operation);
+            return p->main(ctx, operation);
         }
     }
     __except (cr_seh_filter(ctx, GetExceptionCode()))
@@ -1320,9 +1319,9 @@ static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
 #else
     if (int sig = __builtin_setjmp(env))
     {
-        ctx.version = ctx.last_working_version;
-        ctx.failure = cr_signal_to_failure(sig);
-        CR_LOG("1 FAILURE: %d (CR: %d)\n", sig, ctx.failure);
+        ctx->version = ctx->last_working_version;
+        ctx->failure = cr_signal_to_failure(sig);
+        CR_LOG("1 FAILURE: %d (CR: %d)\n", sig, ctx->failure);
         return -1;
     }
     else
@@ -1360,7 +1359,7 @@ static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
 
 using so_handle = void*;
 
-static time_t cr_last_write_time(const std::string& path)
+static int64_t cr_last_write_time(const std::string& path)
 {
     struct stat stats;
     if (stat(path.c_str(), &stats) == -1)
@@ -1459,10 +1458,10 @@ static size_t cr_file_size(const std::string& path)
 // base = is the in file section address
 // shdr = the in file section header
 template <class H>
-void cr_elf_section_save(cr_plugin& ctx, cr_plugin_section_type::e type, int64_t vaddr, int64_t base, H shdr)
+void cr_elf_section_save(cr_plugin* ctx, cr_plugin_section_type::e type, int64_t vaddr, int64_t base, H shdr)
 {
     const auto   version  = CR_SECTION_VERSION_CURRENT;
-    auto         p        = (cr_internal*)ctx.p;
+    auto         p        = (cr_internal*)ctx->p;
     auto         data     = &p->data[type][version];
     const size_t old_size = data->size;
     data->base            = base;
@@ -1482,10 +1481,10 @@ void cr_elf_section_save(cr_plugin& ctx, cr_plugin_section_type::e type, int64_t
 // section tracking information and alloc the required temporary space to use
 // during unload.
 template <class H>
-bool cr_elf_validate_sections(cr_plugin& ctx, bool rollback, H shdr, int shnum, const char* sh_strtab_p)
+bool cr_elf_validate_sections(cr_plugin* ctx, bool rollback, H shdr, int shnum, const char* sh_strtab_p)
 {
     CR_ASSERT(sh_strtab_p);
-    auto p      = (cr_internal*)ctx.p;
+    auto p      = (cr_internal*)ctx->p;
     bool result = true;
     for (int i = 0; i < shnum; ++i)
     {
@@ -1498,7 +1497,7 @@ bool cr_elf_validate_sections(cr_plugin& ctx, bool rollback, H shdr, int shnum, 
         {
             const int64_t vaddr = base - size;
             auto          sec   = CR_SECTION_TYPE_STATE;
-            if (ctx.version || rollback)
+            if (ctx->version || rollback)
             {
                 result &= cr_plugin_section_validate(ctx, sec, vaddr, addr, size);
             }
@@ -1512,7 +1511,7 @@ bool cr_elf_validate_sections(cr_plugin& ctx, bool rollback, H shdr, int shnum, 
             // .bss goes past segment filesz, but it may be just padding
             const int64_t vaddr = base;
             auto          sec   = CR_SECTION_TYPE_BSS;
-            if (ctx.version || rollback)
+            if (ctx->version || rollback)
             {
                 // this is kinda hack to skip bss validation if our data is zero
                 // this means we don't care scrapping it, and helps skipping
@@ -1533,10 +1532,10 @@ bool cr_elf_validate_sections(cr_plugin& ctx, bool rollback, H shdr, int shnum, 
 
 struct cr_ld_data
 {
-    cr_plugin*  ctx                  = nullptr;
+    cr_plugin*  ctx                  = NULL;
     int64_t     data_segment_address = 0;
     int64_t     data_segment_size    = 0;
-    const char* fullname             = nullptr;
+    const char* fullname             = NULL;
 };
 
 // Iterate over all loaded shared objects and then for each one, iterates
@@ -1586,12 +1585,12 @@ static int cr_dl_header_handler(struct dl_phdr_info* info, size_t, void* data)
     return 0;
 }
 
-static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const std::string& imagefile, bool rollback)
+static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const std::string& imagefile, bool rollback)
 {
     CR_ASSERT(handle);
     cr_ld_data data;
     data.ctx   = &ctx;
-    auto pimpl = (cr_internal*)ctx.p;
+    auto pimpl = (cr_internal*)ctx->p;
     if (pimpl->mode == CR_DISABLE)
     {
         return true;
@@ -1600,7 +1599,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
     dl_iterate_phdr(cr_dl_header_handler, (void*)&data);
 
     const auto len    = cr_file_size(imagefile);
-    char*      p      = nullptr;
+    char*      p      = NULL;
     bool       result = false;
     do
     {
@@ -1633,7 +1632,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
 
     if (!result)
     {
-        ctx.failure = CR_STATE_INVALIDATED;
+        ctx->failure = CR_STATE_INVALIDATED;
     }
 
     return result;
@@ -1659,10 +1658,10 @@ typedef struct mach_header macho_hdr;
 // save section information to be used during load/unload when copying
 // around global state (from .bss and .state binary sections).
 // vaddr = is the in memory loaded address of the segment-section
-void cr_macho_section_save(cr_plugin& ctx, cr_plugin_section_type::e type, intptr_t addr, size_t size)
+void cr_macho_section_save(cr_plugin* ctx, cr_plugin_section_type::e type, intptr_t addr, size_t size)
 {
     const auto   version  = CR_SECTION_VERSION_CURRENT;
-    auto         p        = (cr_internal*)ctx.p;
+    auto         p        = (cr_internal*)ctx->p;
     auto         data     = &p->data[type][version];
     const size_t old_size = data->size;
     data->base            = 0;
@@ -1682,10 +1681,10 @@ void cr_macho_section_save(cr_plugin& ctx, cr_plugin_section_type::e type, intpt
 //
 // Some useful references:
 // man 3 dyld
-static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const std::string& imagefile, bool rollback)
+static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const std::string& imagefile, bool rollback)
 {
     bool result = true;
-    auto pimpl  = (cr_internal*)ctx.p;
+    auto pimpl  = (cr_internal*)ctx->p;
     if (pimpl->mode == CR_DISABLE)
     {
         return result;
@@ -1732,7 +1731,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
         {
             if (addr != 0 && size != 0)
             {
-                if (ctx.version || rollback)
+                if (ctx->version || rollback)
                 {
                     result &= cr_plugin_section_validate(ctx, sec, addr, 0, size);
                 }
@@ -1760,10 +1759,10 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
 
 #endif
 
-static void cr_so_unload(cr_plugin& ctx)
+static void cr_so_unload(cr_plugin* ctx)
 {
-    CR_ASSERT(ctx.p);
-    auto p = (cr_internal*)ctx.p;
+    CR_ASSERT(ctx->p);
+    auto p = (cr_internal*)ctx->p;
     CR_ASSERT(p->handle);
 
     const int r = dlclose(p->handle);
@@ -1772,8 +1771,8 @@ static void cr_so_unload(cr_plugin& ctx)
         CR_ERROR("Error closing plugin: %d\n", r);
     }
 
-    p->handle = nullptr;
-    p->main   = nullptr;
+    p->handle = NULL;
+    p->main   = NULL;
 }
 
 static so_handle cr_so_load(const std::string& new_file)
@@ -1822,22 +1821,22 @@ static void cr_plat_init()
     sigemptyset(&sa.sa_mask);
     sa.sa_sigaction = cr_signal_handler;
 #if defined(__linux__)
-    sa.sa_restorer = nullptr;
+    sa.sa_restorer = NULL;
 #endif
 
-    if (sigaction(SIGILL, &sa, nullptr) == -1)
+    if (sigaction(SIGILL, &sa, NULL) == -1)
     {
         CR_ERROR("Failed to setup SIGILL handler\n");
     }
-    if (sigaction(SIGBUS, &sa, nullptr) == -1)
+    if (sigaction(SIGBUS, &sa, NULL) == -1)
     {
         CR_ERROR("Failed to setup SIGBUS handler\n");
     }
-    if (sigaction(SIGSEGV, &sa, nullptr) == -1)
+    if (sigaction(SIGSEGV, &sa, NULL) == -1)
     {
         CR_ERROR("Failed to setup SIGSEGV handler\n");
     }
-    if (sigaction(SIGABRT, &sa, nullptr) == -1)
+    if (sigaction(SIGABRT, &sa, NULL) == -1)
     {
         CR_ERROR("Failed to setup SIGABRT handler\n");
     }
@@ -1861,18 +1860,18 @@ static cr_failure cr_signal_to_failure(int sig)
     return static_cast<cr_failure>(CR_OTHER + sig);
 }
 
-static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
+static int cr_plugin_main(cr_plugin* ctx, cr_op operation)
 {
     if (int sig = sigsetjmp(env, 1))
     {
-        ctx.version = ctx.last_working_version;
-        ctx.failure = cr_signal_to_failure(sig);
-        CR_LOG("1 FAILURE: %d (CR: %d)\n", sig, ctx.failure);
+        ctx->version = ctx->last_working_version;
+        ctx->failure = cr_signal_to_failure(sig);
+        CR_LOG("1 FAILURE: %d (CR: %d)\n", sig, ctx->failure);
         return -1;
     }
     else
     {
-        auto p = (cr_internal*)ctx.p;
+        auto p = (cr_internal*)ctx->p;
         CR_ASSERT(p);
         if (p->main)
         {
@@ -1885,41 +1884,41 @@ static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
 
 #endif // __linux__ || __APPLE__
 
-static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
+static bool cr_plugin_load_internal(cr_plugin* ctx, bool rollback)
 {
     CR_TRACE
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     if (cr_exists(p->filepath) || rollback)
     {
-        if (ctx.version)
+        if (ctx->version)
         {
-            CR_LOG("unload version #%u with rollback: %d\n", ctx.version, rollback);
+            CR_LOG("unload version #%u with rollback: %d\n", ctx->version, rollback);
         }
         int r = cr_plugin_unload(ctx, rollback, false);
         if (r < 0)
             return false;
 
-        unsigned int new_version = rollback ? ctx.version : ctx.next_version;
+        unsigned int new_version = rollback ? ctx->version : ctx->next_version;
         char         new_file[1024];
         cr_version_path(p->filepath, new_version, new_file, sizeof(new_file));
         if (rollback)
         {
-            if (ctx.version == 0)
+            if (ctx->version == 0)
             {
-                ctx.failure = CR_INITIAL_FAILURE;
+                ctx->failure = CR_INITIAL_FAILURE;
                 return false;
             }
             // Don't rollback to this version again, if it crashes.
-            ctx.last_working_version = ctx.version > 0 ? ctx.version - 1 : 0;
+            ctx->last_working_version = ctx->version > 0 ? ctx->version - 1 : 0;
         }
         else
         {
             // Save current version for rollback.
-            ctx.last_working_version = ctx.version;
+            ctx->last_working_version = ctx->version;
             cr_copy(p->filepath, new_file);
 
             // Update `next_version` for use by the next reload.
-            ctx.next_version = new_version + 1;
+            ctx->next_version = new_version + 1;
 
 #if defined(_MSC_VER)
             if (!cr_pdb_process(new_file))
@@ -1933,7 +1932,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
         so_handle new_dll = cr_so_load(new_file);
         if (!new_dll)
         {
-            ctx.failure = CR_BAD_IMAGE;
+            ctx->failure = CR_BAD_IMAGE;
             return false;
         }
 
@@ -1946,7 +1945,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
         {
             cr_plugin_sections_reload(ctx, CR_SECTION_VERSION_BACKUP);
         }
-        else if (ctx.version)
+        else if (ctx->version)
         {
             cr_plugin_sections_reload(ctx, CR_SECTION_VERSION_CURRENT);
         }
@@ -1957,15 +1956,15 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
             return false;
         }
 
-        cr_internal* p2 = (cr_internal*)ctx.p;
+        cr_internal* p2 = (cr_internal*)ctx->p;
         p2->handle      = new_dll;
         p2->main        = new_main;
-        if (ctx.failure != CR_BAD_IMAGE)
+        if (ctx->failure != CR_BAD_IMAGE)
         {
             p2->timestamp = cr_last_write_time(p->filepath);
         }
-        ctx.version = new_version;
-        CR_LOG("loaded: %s (version: %d)\n", new_file, ctx.version);
+        ctx->version = new_version;
+        CR_LOG("loaded: %s (version: %d)\n", new_file, ctx->version);
     }
     else
     {
@@ -1975,10 +1974,10 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
     return true;
 }
 
-static bool cr_plugin_section_validate(cr_plugin& ctx, CRSectionType type, intptr_t ptr, intptr_t base, int64_t size)
+static bool cr_plugin_section_validate(cr_plugin* ctx, CRSectionType type, intptr_t ptr, intptr_t base, int64_t size)
 {
     CR_TRACE(void) ptr;
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     switch (p->mode)
     {
     case CR_SAFE:
@@ -1995,9 +1994,9 @@ static bool cr_plugin_section_validate(cr_plugin& ctx, CRSectionType type, intpt
 }
 
 // internal
-static void cr_plugin_sections_backup(cr_plugin& ctx)
+static void cr_plugin_sections_backup(cr_plugin* ctx)
 {
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     if (p->mode == CR_DISABLE)
     {
         return;
@@ -2029,9 +2028,9 @@ static void cr_plugin_sections_backup(cr_plugin& ctx)
 // valid state checkpoint. This is mostly due that a new load may want to
 // modify the state and if anything bad happens we are sure to have a valid
 // and compatible copy of the state for the previous version of the plugin.
-static void cr_plugin_sections_store(cr_plugin& ctx)
+static void cr_plugin_sections_store(cr_plugin* ctx)
 {
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     if (p->mode == CR_DISABLE)
     {
         return;
@@ -2055,10 +2054,10 @@ static void cr_plugin_sections_store(cr_plugin& ctx)
 // internal
 // After a load happens reload the global state from previous version from our
 // internal copy created during the unload step.
-static void cr_plugin_sections_reload(cr_plugin& ctx, CRSectionVersion version)
+static void cr_plugin_sections_reload(cr_plugin* ctx, CRSectionVersion version)
 {
     CR_ASSERT(version < CR_SECTION_VERSION_COUNT);
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     if (p->mode == CR_DISABLE)
     {
         return;
@@ -2084,10 +2083,10 @@ static void cr_plugin_sections_reload(cr_plugin& ctx, CRSectionVersion version)
 // internal
 // Cleanup and frees any temporary memory used to keep global static data
 // between sessions, used during shutdown.
-static void cr_so_sections_free(cr_plugin& ctx)
+static void cr_so_sections_free(cr_plugin* ctx)
 {
     CR_TRACE
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     for (int i = 0; i < CR_SECTION_TYPE_COUNT; ++i)
     {
         for (int v = 0; v < CR_SECTION_VERSION_COUNT; ++v)
@@ -2096,16 +2095,16 @@ static void cr_so_sections_free(cr_plugin& ctx)
             {
                 CR_FREE(p->data[i][v].data);
             }
-            p->data[i][v].data = nullptr;
+            p->data[i][v].data = NULL;
         }
     }
 }
 
-static bool cr_plugin_changed(cr_plugin& ctx)
+static bool cr_plugin_changed(cr_plugin* ctx)
 {
-    cr_internal* p   = (cr_internal*)ctx.p;
-    const time_t src = cr_last_write_time(p->filepath);
-    const time_t cur = p->timestamp;
+    cr_internal*  p   = (cr_internal*)ctx->p;
+    const int64_t src = cr_last_write_time(p->filepath);
+    const int64_t cur = p->timestamp;
     return src > cur;
 }
 
@@ -2116,10 +2115,10 @@ static bool cr_plugin_changed(cr_plugin& ctx)
 // unload is due a rollback, no `cr_op::CR_UNLOAD` is called neither any state
 // is saved, giving opportunity to the previous version to continue with valid
 // previous state.
-static int cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close)
+static int cr_plugin_unload(cr_plugin* ctx, bool rollback, bool close)
 {
     CR_TRACE
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
     int          r = 0;
     if (p->handle)
     {
@@ -2137,8 +2136,8 @@ static int cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close)
             }
         }
         cr_so_unload(ctx);
-        p->handle = nullptr;
-        p->main   = nullptr;
+        p->handle = NULL;
+        p->main   = NULL;
     }
     return r;
 }
@@ -2147,7 +2146,7 @@ static int cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close)
 // Force a version rollback, causing a partial-unload and a load with the
 // previous version, also triggering an update with `cr_op::CR_LOAD` that
 // in turn may also cause more rollbacks.
-static bool cr_plugin_rollback(cr_plugin& ctx)
+static bool cr_plugin_rollback(cr_plugin* ctx)
 {
     CR_TRACE
     bool loaded = cr_plugin_load_internal(ctx, true);
@@ -2156,7 +2155,7 @@ static bool cr_plugin_rollback(cr_plugin& ctx)
         loaded = cr_plugin_main(ctx, CR_LOAD) >= 0;
         if (loaded)
         {
-            ctx.failure = CR_NONE;
+            ctx->failure = CR_NONE;
         }
     }
     return loaded;
@@ -2167,7 +2166,7 @@ static bool cr_plugin_rollback(cr_plugin& ctx)
 // update one time with `cr_op::CR_LOAD`. Note that this may fail due to crash
 // handling during this first update, effectivelly rollbacking if possible and
 // causing a consecutive `CR_LOAD` with the previous version.
-static void cr_plugin_reload(cr_plugin& ctx)
+static void cr_plugin_reload(cr_plugin* ctx)
 {
     if (cr_plugin_changed(ctx))
     {
@@ -2177,10 +2176,10 @@ static void cr_plugin_reload(cr_plugin& ctx)
             return;
         }
         int r = cr_plugin_main(ctx, CR_LOAD);
-        if (r < 0 && !ctx.failure)
+        if (r < 0 && !ctx->failure)
         {
             CR_LOG("2 FAILURE: %d\n", r);
-            ctx.failure = CR_USER;
+            ctx->failure = CR_USER;
         }
     }
 }
@@ -2189,13 +2188,13 @@ static void cr_plugin_reload(cr_plugin& ctx)
 // frequently as your core logic/application needs. -1 and -2 are the only
 // possible return values from cr meaning a fatal error (causes rollback),
 // other return values are returned directly from `cr_main`.
-extern "C" int cr_plugin_update(cr_plugin& ctx, bool reloadCheck = true)
+int cr_plugin_update(cr_plugin* ctx, bool reloadCheck)
 {
-    if (ctx.failure)
+    if (ctx->failure)
     {
-        CR_LOG("1 ROLLBACK version was %d\n", ctx.version);
+        CR_LOG("1 ROLLBACK version was %d\n", ctx->version);
         cr_plugin_rollback(ctx);
-        CR_LOG("1 ROLLBACK version is now %d\n", ctx.version);
+        CR_LOG("1 ROLLBACK version is now %d\n", ctx->version);
 #ifdef __MINGW32__
         cr_plat_init();
 #endif
@@ -2210,23 +2209,23 @@ extern "C" int cr_plugin_update(cr_plugin& ctx, bool reloadCheck = true)
 
     // -2 to differentiate from crash handling code path, meaning the crash
     // happened probably during load or unload and not update
-    if (ctx.failure)
+    if (ctx->failure)
     {
         CR_LOG("3 FAILURE: -2\n");
         return -2;
     }
 
     int r = cr_plugin_main(ctx, CR_STEP);
-    if (r < 0 && !ctx.failure)
+    if (r < 0 && !ctx->failure)
     {
         CR_LOG("4 FAILURE: CR_USER\n");
-        ctx.failure = CR_USER;
+        ctx->failure = CR_USER;
     }
     return r;
 }
 
 // Loads a plugin from the specified full path (or current directory if NULL).
-extern "C" bool cr_plugin_open(cr_plugin& ctx, const char* path)
+bool cr_plugin_open(cr_plugin* ctx, const char* path)
 {
     CR_TRACE
     CR_ASSERT(path);
@@ -2237,30 +2236,30 @@ extern "C" bool cr_plugin_open(cr_plugin& ctx, const char* path)
     cr_internal* p = (cr_internal*)calloc(1, sizeof(*p));
     p->mode        = CR_OP_MODE;
     snprintf(p->filepath, sizeof(p->filepath), "%s", path);
-    ctx.p                    = p;
-    ctx.next_version         = 1;
-    ctx.last_working_version = 0;
-    ctx.version              = 0;
-    ctx.failure              = CR_NONE;
+    ctx->p                    = p;
+    ctx->next_version         = 1;
+    ctx->last_working_version = 0;
+    ctx->version              = 0;
+    ctx->failure              = CR_NONE;
     cr_plat_init();
     return true;
 }
 
 // 20200109 [DEPRECATED] Use `cr_plugin_open` instead.
-extern "C" bool cr_plugin_load(cr_plugin& ctx, const char* fullpath) { return cr_plugin_open(ctx, fullpath); }
+bool cr_plugin_load(cr_plugin* ctx, const char* fullpath) { return cr_plugin_open(ctx, fullpath); }
 
 // Call to cleanup internal state once the plugin is not required anymore.
-extern "C" void cr_plugin_close(cr_plugin& ctx)
+void cr_plugin_close(cr_plugin* ctx)
 {
     CR_TRACE
     const bool rollback = false;
     const bool close    = true;
     cr_plugin_unload(ctx, rollback, close);
     cr_so_sections_free(ctx);
-    cr_internal* p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx->p;
 
     // delete backups
-    for (unsigned int i = 0; i < ctx.version; i++)
+    for (unsigned int i = 0; i < ctx->version; i++)
     {
         char scratchpath[1024];
         cr_version_path(p->filepath, i, scratchpath, sizeof(scratchpath));
@@ -2273,8 +2272,8 @@ extern "C" void cr_plugin_close(cr_plugin& ctx)
     }
 
     free(p);
-    ctx.p       = nullptr;
-    ctx.version = 0;
+    ctx->p       = NULL;
+    ctx->version = 0;
 }
 
 #endif // #ifndef CR_HOST

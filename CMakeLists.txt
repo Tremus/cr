@@ -24,6 +24,6 @@ add_compile_definitions(
     HOTRELOAD_BUILD_COMMAND="cmake --build ${CMAKE_BINARY_DIR} --config Debug --target ${HOTRELOAD_LIB_NAME}"
     )
 
-add_executable(hotreloader hotreload_win.cpp)
+add_executable(hotreloader hotreload_win.c)
 add_library(${HOTRELOAD_LIB_NAME} MODULE src/main.c)
 add_dependencies(hotreloader ${HOTRELOAD_LIB_NAME})
