@@ -831,299 +831,137 @@ static void cr_del(const char* path)
 // lock this unique PDB and the compiler will be able to overwrite the
 // original one.
 #if defined(_MSC_VER)
-#include <crtdbg.h>
-#include <limits.h>
-#include <stdio.h>
-#include <tchar.h>
-
-static void* struct_cast(void* ptr, LONG offset) { return (void*)((intptr_t)(ptr) + offset); }
-
 // RSDS Debug Information for PDB files
-// using DebugInfoSignature = DWORD;
-typedef DWORD DebugInfoSignature;
+// http://www.godevtool.com/Other/pdb.htm
 #define CR_RSDS_SIGNATURE 'SDSR'
 typedef struct cr_rsds_hdr
 {
-    DebugInfoSignature signature;
-    GUID               guid;
-    long               version;
-    char               filename[1];
+    DWORD signature;
+    GUID  guid;
+    long  version;
+    char  filename[1];
 } cr_rsds_hdr;
+_Static_assert(offsetof(cr_rsds_hdr, guid) == 4, "");
+_Static_assert(offsetof(cr_rsds_hdr, version) == 20, "");
+_Static_assert(offsetof(cr_rsds_hdr, filename) == 24, "");
 
-static bool cr_pe_debugdir_rva(PIMAGE_OPTIONAL_HEADER optionalHeader, DWORD* debugDirRva, DWORD* debugDirSize)
+static bool cr_duplicate_and_patch_dll_and_pdb(const char* next_path_dll)
 {
-    if (optionalHeader->Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-    {
-        PIMAGE_OPTIONAL_HEADER64 optionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)(optionalHeader);
-        *debugDirRva  = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
-        *debugDirSize = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
-    }
-    else
-    {
-        PIMAGE_OPTIONAL_HEADER32 optionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)(optionalHeader);
-        *debugDirRva  = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
-        *debugDirSize = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
-    }
-
-    if (*debugDirRva == 0 && *debugDirSize == 0)
-    {
-        return true;
-    }
-    else if (*debugDirRva == 0 || *debugDirSize == 0)
-    {
-        return false;
-    }
-
-    return true;
-}
-
-static bool cr_pe_fileoffset_rva(PIMAGE_NT_HEADERS ntHeaders, DWORD rva, DWORD* fileOffset)
-{
-    bool                  found         = false;
-    PIMAGE_SECTION_HEADER sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
-    for (int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, sectionHeader++)
-    {
-        DWORD sectionSize = sectionHeader->Misc.VirtualSize;
-        if ((rva >= sectionHeader->VirtualAddress) && (rva < sectionHeader->VirtualAddress + sectionSize))
-        {
-            found = true;
-            break;
-        }
-    }
-
-    if (!found)
-    {
-        return false;
-    }
-
-    const int diff = (int)(sectionHeader->VirtualAddress - sectionHeader->PointerToRawData);
-    *fileOffset    = rva - diff;
-    return true;
-}
-
-static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
-{
-    CR_ASSERT(debugDir && imageBase);
-    LPBYTE      debugInfo     = imageBase + debugDir->PointerToRawData;
-    const DWORD debugInfoSize = debugDir->SizeOfData;
-    if (debugInfo == 0 || debugInfoSize == 0)
-    {
-        return NULL;
-    }
-
-    if (IsBadReadPtr(debugInfo, debugInfoSize))
-    {
-        return NULL;
-    }
-
-    if (debugInfoSize < sizeof(DebugInfoSignature))
-    {
-        return NULL;
-    }
-
-    if (debugDir->Type == IMAGE_DEBUG_TYPE_CODEVIEW)
-    {
-        DWORD signature = *(DWORD*)debugInfo;
-        if (signature == CR_RSDS_SIGNATURE)
-        {
-            cr_rsds_hdr* info = (cr_rsds_hdr*)(debugInfo);
-            if (IsBadReadPtr(debugInfo, sizeof(cr_rsds_hdr)))
-            {
-                return NULL;
-            }
-
-            if (IsBadStringPtrA((const char*)info->filename, UINT_MAX))
-            {
-                return NULL;
-            }
-
-            return info->filename;
-        }
-    }
-
-    return NULL;
-}
-
-static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char orig_pdb[MAX_PATH])
-{
-    WCHAR wpath[MAX_PATH];
-    cr_windows_convert_path(next_path_dll, wpath);
-
     HANDLE fp      = NULL;
     HANDLE filemap = NULL;
     LPVOID mem     = 0;
-    bool   result  = false;
+    bool   success = false;
+
     do
     {
-        fp = CreateFileW(
-            wpath,
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ,
-            NULL,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL);
-        if ((fp == INVALID_HANDLE_VALUE) || (fp == NULL))
         {
-            break;
+            WCHAR wpath[MAX_PATH];
+            cr_windows_convert_path(next_path_dll, wpath);
+            fp = CreateFileW(
+                wpath,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                NULL,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                NULL);
         }
+        if (fp == INVALID_HANDLE_VALUE)
+            fp = NULL;
+        CR_ASSERT(fp != NULL);
+        if (!fp)
+            break;
 
         filemap = CreateFileMappingW(fp, NULL, PAGE_READWRITE, 0, 0, NULL);
-        if (filemap == NULL)
-        {
+        CR_ASSERT(filemap != NULL);
+        if (!filemap)
             break;
-        }
 
         mem = MapViewOfFile(filemap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-        if (mem == NULL)
-        {
+        CR_ASSERT(mem != NULL);
+        if (!mem)
             break;
-        }
 
+        // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/SystemServices/struct.IMAGE_DOS_HEADER.html
         PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)(mem);
-        if (dosHeader == 0)
-        {
-            break;
-        }
+        CR_ASSERT(dosHeader);
+        CR_ASSERT(dosHeader->e_magic == IMAGE_DOS_SIGNATURE);
 
-        if (IsBadReadPtr(dosHeader, sizeof(IMAGE_DOS_HEADER)))
-        {
-            break;
-        }
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_nt_headers64
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_file_header
+        // e_lfanew = offset of exe file header
+        PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((char*)dosHeader + dosHeader->e_lfanew);
+        CR_ASSERT(ntHeaders != NULL);
+        CR_ASSERT(ntHeaders->Signature == IMAGE_NT_SIGNATURE);
+        CR_ASSERT(ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
 
-        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-        {
-            break;
-        }
-
-        PIMAGE_NT_HEADERS ntHeaders = struct_cast(dosHeader, dosHeader->e_lfanew);
-        if (ntHeaders == 0)
-        {
-            break;
-        }
-
-        if (IsBadReadPtr(ntHeaders, sizeof(ntHeaders->Signature)))
-        {
-            break;
-        }
-
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
-        {
-            break;
-        }
-
-        if (IsBadReadPtr(&ntHeaders->FileHeader, sizeof(IMAGE_FILE_HEADER)))
-        {
-            break;
-        }
-
-        if (IsBadReadPtr(&ntHeaders->OptionalHeader, ntHeaders->FileHeader.SizeOfOptionalHeader))
-        {
-            break;
-        }
-
-        if (ntHeaders->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
-            ntHeaders->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-        {
-            break;
-        }
-
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_section_header
         PIMAGE_SECTION_HEADER sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
-        if (IsBadReadPtr(sectionHeaders, ntHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)))
-        {
-            break;
-        }
 
-        DWORD debugDirRva  = 0;
-        DWORD debugDirSize = 0;
-        if (!cr_pe_debugdir_rva(&ntHeaders->OptionalHeader, &debugDirRva, &debugDirSize))
-        {
-            break;
-        }
-
-        if (debugDirRva == 0 || debugDirSize == 0)
-        {
-            break;
-        }
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_optional_header32
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_data_directory
+        IMAGE_DATA_DIRECTORY dbgEntry = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+        CR_ASSERT(dbgEntry.VirtualAddress);
+        CR_ASSERT(dbgEntry.Size == sizeof(IMAGE_DEBUG_DIRECTORY));
 
         DWORD debugDirOffset = 0;
-        if (!cr_pe_fileoffset_rva(ntHeaders, debugDirRva, &debugDirOffset))
+        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, sectionHeaders++)
         {
-            break;
-        }
-
-        PIMAGE_DEBUG_DIRECTORY debugDir = struct_cast(mem, debugDirOffset);
-        if (debugDir == 0)
-        {
-            break;
-        }
-
-        if (IsBadReadPtr(debugDir, debugDirSize))
-        {
-            break;
-        }
-
-        if (debugDirSize < sizeof(IMAGE_DEBUG_DIRECTORY))
-        {
-            break;
-        }
-
-        int numEntries = debugDirSize / sizeof(IMAGE_DEBUG_DIRECTORY);
-        if (numEntries == 0)
-        {
-            break;
-        }
-
-        for (int i = 1; i <= numEntries; i++, debugDir++)
-        {
-            char* pdb = cr_pdb_find((LPBYTE)mem, debugDir);
-            if (pdb)
+            DWORD sectionSize = sectionHeaders->Misc.VirtualSize;
+            if ((dbgEntry.VirtualAddress >= sectionHeaders->VirtualAddress) &&
+                (dbgEntry.VirtualAddress < sectionHeaders->VirtualAddress + sectionSize))
             {
-                size_t pdb_strlen     = strlen(pdb);
-                size_t pdbname_strlen = strlen(pdbname);
-                if (pdb_strlen >= pdbname_strlen)
-                {
-                    snprintf(orig_pdb, MAX_PATH, "%s", pdb);
-                    memcpy_s(pdb, pdb_strlen, pdbname, pdbname_strlen);
-                    pdb[pdbname_strlen] = 0;
-                    result              = true;
-                }
+                const DWORD diff = sectionHeaders->VirtualAddress - sectionHeaders->PointerToRawData;
+                debugDirOffset   = dbgEntry.VirtualAddress - diff;
+                break;
             }
         }
+        CR_ASSERT(debugDirOffset > 0);
+        if (!debugDirOffset)
+            break;
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_debug_directory
+        PIMAGE_DEBUG_DIRECTORY debugDir = mem + debugDirOffset;
+        CR_ASSERT(debugDir->Type == IMAGE_DEBUG_TYPE_CODEVIEW);
+        CR_ASSERT(debugDir->SizeOfData >= sizeof(cr_rsds_hdr));
+
+        cr_rsds_hdr* info = (cr_rsds_hdr*)(mem + debugDir->PointerToRawData);
+        CR_ASSERT(info->signature == CR_RSDS_SIGNATURE);
+        if (info->signature != CR_RSDS_SIGNATURE)
+            break;
+
+        // This is the path embedded in the DLL by your compiler (C:\\path\\to\\plugin.pdb)
+        char* embedded_pdb_path = info->filename;
+
+        // Duplicate PDB
+        char        next_pdb[MAX_PATH] = {0};
+        const char* dll_ext            = cr_path_get_extension(next_path_dll);
+        CR_ASSERT(dll_ext);
+        snprintf(next_pdb, sizeof(next_pdb), "%.*s.pdb", (int)(dll_ext - next_path_dll), next_path_dll);
+        success = cr_copy(embedded_pdb_path, next_pdb);
+
+        // Patch DLL with new path
+        // We append a version number to the file name, so the string length will be longer.
+        // Replacing the path with only the new filename (no directory) appears to work fine
+        const char* next_pdb_filename = cr_path_get_filename(next_pdb);
+        CR_ASSERT(next_pdb_filename);
+
+        size_t pdb_strlen = strlen(embedded_pdb_path);
+        CR_ASSERT(pdb_strlen >= strlen(next_pdb_filename));
+        snprintf(embedded_pdb_path, pdb_strlen + 1, "%s", next_pdb_filename);
+
+        success &= true;
     }
     while (0);
 
     if (mem != NULL)
-    {
         UnmapViewOfFile(mem);
-    }
-
     if (filemap != NULL)
-    {
         CloseHandle(filemap);
-    }
-
     if ((fp != NULL) && (fp != INVALID_HANDLE_VALUE))
-    {
         CloseHandle(fp);
-    }
 
-    return result;
-}
-
-bool static cr_pdb_process(const char* next_path_dll)
-{
-    char orig_pdb[MAX_PATH];
-    char next_pdb[MAX_PATH];
-
-    const char* dest_filename = cr_path_get_filename(next_path_dll);
-    CR_ASSERT(dest_filename);
-    const char* dest_ext = cr_path_get_extension(dest_filename);
-
-    bool result = cr_pdb_replace(next_path_dll, dest_filename, orig_pdb);
-    snprintf(next_pdb, sizeof(next_pdb), "%.*s.pdb", (int)(dest_ext - next_path_dll), next_path_dll);
-    result &= cr_copy(orig_pdb, next_pdb);
-    return result;
+    return success;
 }
 #endif // _MSC_VER
 
@@ -1899,8 +1737,8 @@ static bool cr_plugin_load_internal(cr_plugin* ctx, bool rollback)
             return false;
 
         unsigned int new_version = rollback ? ctx->version : ctx->next_version;
-        char         new_file[1024];
-        cr_version_path(p->filepath, new_version, new_file, sizeof(new_file));
+        char         new_filepath[1024];
+        cr_version_path(p->filepath, new_version, new_filepath, sizeof(new_filepath));
         if (rollback)
         {
             if (ctx->version == 0)
@@ -1915,13 +1753,13 @@ static bool cr_plugin_load_internal(cr_plugin* ctx, bool rollback)
         {
             // Save current version for rollback.
             ctx->last_working_version = ctx->version;
-            cr_copy(p->filepath, new_file);
+            cr_copy(p->filepath, new_filepath);
 
             // Update `next_version` for use by the next reload.
             ctx->next_version = new_version + 1;
 
 #if defined(_MSC_VER)
-            if (!cr_pdb_process(new_file))
+            if (!cr_duplicate_and_patch_dll_and_pdb(new_filepath))
             {
                 CR_ERROR("Couldn't process PDB, debugging may be "
                          "affected and/or reload may fail\n");
@@ -1929,14 +1767,14 @@ static bool cr_plugin_load_internal(cr_plugin* ctx, bool rollback)
 #endif // defined(_MSC_VER)
         }
 
-        so_handle new_dll = cr_so_load(new_file);
+        so_handle new_dll = cr_so_load(new_filepath);
         if (!new_dll)
         {
             ctx->failure = CR_BAD_IMAGE;
             return false;
         }
 
-        if (!cr_plugin_validate_sections(ctx, new_dll, new_file, rollback))
+        if (!cr_plugin_validate_sections(ctx, new_dll, new_filepath, rollback))
         {
             return false;
         }
@@ -1964,7 +1802,7 @@ static bool cr_plugin_load_internal(cr_plugin* ctx, bool rollback)
             p2->timestamp = cr_last_write_time(p->filepath);
         }
         ctx->version = new_version;
-        CR_LOG("loaded: %s (version: %d)\n", new_file, ctx->version);
+        CR_LOG("loaded: %s (version: %d)\n", new_filepath, ctx->version);
     }
     else
     {

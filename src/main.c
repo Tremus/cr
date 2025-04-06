@@ -47,6 +47,7 @@ void test_crash()
     (void)addr; // warning
     // to test crash protection, uncomment the following line
     // int i = *addr;
+    // __debugbreak();
 }
 
 CR_EXPORT int cr_main(struct cr_plugin* ctx, enum cr_op operation)
