@@ -852,107 +852,96 @@ static bool cr_duplicate_and_patch_dll_and_pdb(const char* next_path_dll)
     LPVOID mem     = 0;
     bool   success = false;
 
-    do
     {
-        {
-            WCHAR wpath[MAX_PATH];
-            cr_windows_convert_path(next_path_dll, wpath);
-            fp = CreateFileW(
-                wpath,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ,
-                NULL,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                NULL);
-        }
+        WCHAR wpath[MAX_PATH];
+        cr_windows_convert_path(next_path_dll, wpath);
+        fp = CreateFileW(
+            wpath,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ,
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL);
         if (fp == INVALID_HANDLE_VALUE)
             fp = NULL;
-        CR_ASSERT(fp != NULL);
-        if (!fp)
-            break;
+        if (fp)
+            filemap = CreateFileMappingW(fp, NULL, PAGE_READWRITE, 0, 0, NULL);
 
-        filemap = CreateFileMappingW(fp, NULL, PAGE_READWRITE, 0, 0, NULL);
-        CR_ASSERT(filemap != NULL);
-        if (!filemap)
-            break;
+        if (filemap)
+            mem = MapViewOfFile(filemap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+        CR_ASSERT(mem);
+    }
 
-        mem = MapViewOfFile(filemap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-        CR_ASSERT(mem != NULL);
-        if (!mem)
-            break;
-
+    if (mem)
+    {
         // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/SystemServices/struct.IMAGE_DOS_HEADER.html
-        PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)(mem);
-        CR_ASSERT(dosHeader);
+        const PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)mem;
         CR_ASSERT(dosHeader->e_magic == IMAGE_DOS_SIGNATURE);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_nt_headers64
         // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_file_header
         // e_lfanew = offset of exe file header
-        PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((char*)dosHeader + dosHeader->e_lfanew);
-        CR_ASSERT(ntHeaders != NULL);
+        const PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((char*)dosHeader + dosHeader->e_lfanew);
         CR_ASSERT(ntHeaders->Signature == IMAGE_NT_SIGNATURE);
         CR_ASSERT(ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_section_header
-        PIMAGE_SECTION_HEADER sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
+        PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(ntHeaders);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_optional_header32
         // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_data_directory
-        IMAGE_DATA_DIRECTORY dbgEntry = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
-        CR_ASSERT(dbgEntry.VirtualAddress);
-        CR_ASSERT(dbgEntry.Size == sizeof(IMAGE_DEBUG_DIRECTORY));
+        const IMAGE_DATA_DIRECTORY entry = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+        CR_ASSERT(entry.VirtualAddress);
+        CR_ASSERT(entry.Size == sizeof(IMAGE_DEBUG_DIRECTORY));
 
-        DWORD debugDirOffset = 0;
-        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, sectionHeaders++)
+        cr_rsds_hdr* rsds = NULL;
+        for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, section++)
         {
-            DWORD sectionSize = sectionHeaders->Misc.VirtualSize;
-            if ((dbgEntry.VirtualAddress >= sectionHeaders->VirtualAddress) &&
-                (dbgEntry.VirtualAddress < sectionHeaders->VirtualAddress + sectionSize))
+            const DWORD pStart = section->VirtualAddress;
+            const DWORD pEnd   = section->VirtualAddress + section->Misc.VirtualSize;
+            if ((entry.VirtualAddress >= pStart) && (entry.VirtualAddress < pEnd))
             {
-                const DWORD diff = sectionHeaders->VirtualAddress - sectionHeaders->PointerToRawData;
-                debugDirOffset   = dbgEntry.VirtualAddress - diff;
+                const DWORD diff   = section->VirtualAddress - section->PointerToRawData;
+                const DWORD offset = entry.VirtualAddress - diff;
+
+                // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_debug_directory
+                const PIMAGE_DEBUG_DIRECTORY dir = mem + offset;
+
+                CR_ASSERT(dir->Type == IMAGE_DEBUG_TYPE_CODEVIEW);
+                CR_ASSERT(dir->SizeOfData >= sizeof(cr_rsds_hdr));
+
+                rsds = (cr_rsds_hdr*)(mem + dir->PointerToRawData);
+                CR_ASSERT(rsds->signature == CR_RSDS_SIGNATURE);
+
                 break;
             }
         }
-        CR_ASSERT(debugDirOffset > 0);
-        if (!debugDirOffset)
-            break;
+        CR_ASSERT(rsds);
+        if (rsds)
+        {
+            // This is the path embedded in the DLL by your compiler (eg. C:\\path\\to\\plugin.pdb)
+            char* embedded_pdb_path = rsds->filename;
 
-        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_debug_directory
-        PIMAGE_DEBUG_DIRECTORY debugDir = mem + debugDirOffset;
-        CR_ASSERT(debugDir->Type == IMAGE_DEBUG_TYPE_CODEVIEW);
-        CR_ASSERT(debugDir->SizeOfData >= sizeof(cr_rsds_hdr));
+            // Duplicate PDB
+            char        next_pdb_path[MAX_PATH] = {0};
+            const char* dll_ext                 = cr_path_get_extension(next_path_dll);
+            snprintf(next_pdb_path, sizeof(next_pdb_path), "%.*s.pdb", (int)(dll_ext - next_path_dll), next_path_dll);
+            success = cr_copy(embedded_pdb_path, next_pdb_path);
 
-        cr_rsds_hdr* info = (cr_rsds_hdr*)(mem + debugDir->PointerToRawData);
-        CR_ASSERT(info->signature == CR_RSDS_SIGNATURE);
-        if (info->signature != CR_RSDS_SIGNATURE)
-            break;
+            // Patch DLL with new path
+            // We append a version number to the file name, so the string length will be longer.
+            // Replacing the path with only the new filename (no directory) appears to work fine
+            const char* next_pdb_filename = cr_path_get_filename(next_pdb_path);
 
-        // This is the path embedded in the DLL by your compiler (C:\\path\\to\\plugin.pdb)
-        char* embedded_pdb_path = info->filename;
+            size_t path_bufsize = 1 + strlen(embedded_pdb_path);
+            CR_ASSERT(path_bufsize >= strlen(next_pdb_filename));
+            snprintf(embedded_pdb_path, path_bufsize, "%s", next_pdb_filename);
 
-        // Duplicate PDB
-        char        next_pdb[MAX_PATH] = {0};
-        const char* dll_ext            = cr_path_get_extension(next_path_dll);
-        CR_ASSERT(dll_ext);
-        snprintf(next_pdb, sizeof(next_pdb), "%.*s.pdb", (int)(dll_ext - next_path_dll), next_path_dll);
-        success = cr_copy(embedded_pdb_path, next_pdb);
-
-        // Patch DLL with new path
-        // We append a version number to the file name, so the string length will be longer.
-        // Replacing the path with only the new filename (no directory) appears to work fine
-        const char* next_pdb_filename = cr_path_get_filename(next_pdb);
-        CR_ASSERT(next_pdb_filename);
-
-        size_t pdb_strlen = strlen(embedded_pdb_path);
-        CR_ASSERT(pdb_strlen >= strlen(next_pdb_filename));
-        snprintf(embedded_pdb_path, pdb_strlen + 1, "%s", next_pdb_filename);
-
-        success &= true;
+            success &= true;
+            CR_ASSERT(success);
+        }
     }
-    while (0);
 
     if (mem != NULL)
         UnmapViewOfFile(mem);
