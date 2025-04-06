@@ -670,10 +670,8 @@ struct cr_plugin
 #endif
 
 #include <algorithm>
-#include <chrono>  // duration for sleep
-#include <cstring> // memcpy
+#include <memory> // unique_ptr
 #include <string>
-#include <thread> // this_thread::sleep_for
 
 #if defined(_WIN32)
 #define CR_PATH_SEPARATOR         '\\'
@@ -809,49 +807,37 @@ void cr_set_temporary_path(cr_plugin& ctx, const std::string& path)
 
 #if defined(_WIN32)
 
-// clang-format off
 #ifndef WIN32_LEAN_AND_MEAN
-#   define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef UNICODE
+#define UNICODE
 #endif
 #include <windows.h>
+
 #include <dbghelp.h>
-// clang-format on
+
 #if defined(_MSC_VER)
 #pragma comment(lib, "dbghelp.lib")
 #endif
 using so_handle = HMODULE;
 
-#ifdef UNICODE
-#define CR_WINDOWS_ConvertPath(_newpath, _path) std::wstring _newpath(cr_utf8_to_wstring(_path))
-
-static std::wstring cr_utf8_to_wstring(const std::string& str)
+static int cr_windows_convert_path(const char* in, wchar_t* out)
 {
-    int                        wlen = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, 0, 0);
-    wchar_t                    wpath_small[MAX_PATH];
-    std::unique_ptr<wchar_t[]> wpath_big;
-    wchar_t*                   wpath = wpath_small;
-    if (wlen > _countof(wpath_small))
-    {
-        wpath_big = std::unique_ptr<wchar_t[]>(new wchar_t[wlen]);
-        wpath     = wpath_big.get();
-    }
+    int num = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, out, MAX_PATH);
+    if (num == 0)
+        __debugbreak();
 
-    if (MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, wpath, wlen) != wlen)
-    {
-        return L"";
-    }
-
-    return wpath;
+    return num;
 }
-#else
-#define CR_WINDOWS_ConvertPath(_newpath, _path) const std::string& _newpath = _path
-#endif // UNICODE
 
 static time_t cr_last_write_time(const std::string& path)
 {
-    CR_WINDOWS_ConvertPath(_path, path);
+    WCHAR wpath[MAX_PATH];
+    cr_windows_convert_path(path.c_str(), wpath);
+
     WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (!GetFileAttributesEx(_path.c_str(), GetFileExInfoStandard, &fad))
+    if (!GetFileAttributesExW(wpath, GetFileExInfoStandard, &fad))
     {
         return -1;
     }
@@ -868,23 +854,27 @@ static time_t cr_last_write_time(const std::string& path)
     return static_cast<time_t>(time.QuadPart / 10000000 - 11644473600LL);
 }
 
-static bool cr_exists(const std::string& path)
+static bool cr_exists(const char* path)
 {
-    CR_WINDOWS_ConvertPath(_path, path);
-    return GetFileAttributes(_path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    WCHAR wpath[MAX_PATH];
+    cr_windows_convert_path(path, wpath);
+    return GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES;
 }
 
-static bool cr_copy(const std::string& from, const std::string& to)
+static bool cr_copy(const char* from, const char* to)
 {
-    CR_WINDOWS_ConvertPath(_from, from);
-    CR_WINDOWS_ConvertPath(_to, to);
-    return CopyFile(_from.c_str(), _to.c_str(), FALSE) ? true : false;
+    WCHAR wfrom[MAX_PATH];
+    WCHAR wto[MAX_PATH];
+    cr_windows_convert_path(from, wfrom);
+    cr_windows_convert_path(to, wto);
+    return CopyFileW(wfrom, wto, FALSE) ? true : false;
 }
 
-static void cr_del(const std::string& path)
+static void cr_del(const char* path)
 {
-    CR_WINDOWS_ConvertPath(_path, path);
-    DeleteFile(_path.c_str());
+    WCHAR wpath[MAX_PATH];
+    cr_windows_convert_path(path, wpath);
+    DeleteFileW(wpath);
 }
 
 // If using Microsoft Visual C/C++ compiler we need to do some workaround the
@@ -1019,9 +1009,10 @@ static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
     return nullptr;
 }
 
-static bool cr_pdb_replace(const std::string& filename, const std::string& pdbname, std::string& orig_pdb)
+static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std::string& orig_pdb)
 {
-    CR_WINDOWS_ConvertPath(_filename, filename);
+    WCHAR wfilename[MAX_PATH];
+    cr_windows_convert_path(filename, wfilename);
 
     HANDLE fp      = nullptr;
     HANDLE filemap = nullptr;
@@ -1029,8 +1020,8 @@ static bool cr_pdb_replace(const std::string& filename, const std::string& pdbna
     bool   result  = false;
     do
     {
-        fp = CreateFile(
-            _filename.c_str(),
+        fp = CreateFileW(
+            wfilename,
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ,
             nullptr,
@@ -1042,7 +1033,7 @@ static bool cr_pdb_replace(const std::string& filename, const std::string& pdbna
             break;
         }
 
-        filemap = CreateFileMapping(fp, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+        filemap = CreateFileMappingW(fp, nullptr, PAGE_READWRITE, 0, 0, nullptr);
         if (filemap == nullptr)
         {
             break;
@@ -1186,10 +1177,11 @@ static bool cr_pdb_replace(const std::string& filename, const std::string& pdbna
 
 bool static cr_pdb_process(const std::string& desination)
 {
-    std::string folder, fname, ext, orig_pdb;
+    std::string folder, fname, ext, orig_pdb, next_pdb;
     cr_split_path(desination, folder, fname, ext);
-    bool result  = cr_pdb_replace(desination, fname + ".pdb", orig_pdb);
-    result      &= cr_copy(orig_pdb, cr_replace_extension(desination, ".pdb"));
+    bool result  = cr_pdb_replace(desination.c_str(), fname + ".pdb", orig_pdb);
+    next_pdb     = cr_replace_extension(desination, ".pdb");
+    result      &= cr_copy(orig_pdb.c_str(), next_pdb.c_str());
     return result;
 }
 #endif // _MSC_VER
@@ -1262,7 +1254,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
             }
             if (result)
             {
-                auto sec = cr_plugin_section_type::bss;
+                cr_plugin_section_type::e sec = cr_plugin_section_type::bss;
                 cr_pe_section_save(ctx, sec, base + sectionHeader.VirtualAddress, base, sectionHeader);
             }
         }
@@ -1277,10 +1269,11 @@ static void cr_so_unload(cr_plugin& ctx)
     FreeLibrary((HMODULE)p->handle);
 }
 
-static so_handle cr_so_load(const std::string& filename)
+static so_handle cr_so_load(const char* path)
 {
-    CR_WINDOWS_ConvertPath(_filename, filename);
-    auto new_dll = LoadLibrary(_filename.c_str());
+    WCHAR wpath[MAX_PATH];
+    cr_windows_convert_path(path, wpath);
+    auto new_dll = LoadLibraryW(wpath);
     if (!new_dll)
     {
         CR_ERROR("Couldn't load plugin: %ld\n", GetLastError());
@@ -1957,7 +1950,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
     CR_TRACE
     auto       p    = (cr_internal*)ctx.p;
     const auto file = p->fullname;
-    if (cr_exists(file) || rollback)
+    if (cr_exists(file.c_str()) || rollback)
     {
         const auto old_file = cr_version_path(file, ctx.version, p->temppath);
         CR_LOG("unload '%s' with rollback: %d\n", old_file.c_str(), rollback);
@@ -1983,7 +1976,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
         {
             // Save current version for rollback.
             ctx.last_working_version = ctx.version;
-            cr_copy(file, new_file);
+            cr_copy(file.c_str(), new_file.c_str());
 
             // Update `next_version` for use by the next reload.
             ctx.next_version = new_version + 1;
@@ -1997,7 +1990,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
 #endif // defined(_MSC_VER)
         }
 
-        auto new_dll = cr_so_load(new_file);
+        auto new_dll = cr_so_load(new_file.c_str());
         if (!new_dll)
         {
             ctx.failure = CR_BAD_IMAGE;
@@ -2332,9 +2325,9 @@ extern "C" void cr_plugin_close(cr_plugin& ctx)
     const auto file = p->fullname;
     for (unsigned int i = 0; i < ctx.version; i++)
     {
-        cr_del(cr_version_path(file, i, p->temppath));
+        cr_del(cr_version_path(file, i, p->temppath).c_str());
 #if defined(_MSC_VER)
-        cr_del(cr_replace_extension(cr_version_path(file, i, p->temppath), ".pdb"));
+        cr_del(cr_replace_extension(cr_version_path(file, i, p->temppath), ".pdb").c_str());
 #endif
     }
 
