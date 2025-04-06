@@ -684,8 +684,8 @@ struct cr_plugin
 static void cr_split_path(std::string path, std::string& parent_dir, std::string& base_name, std::string& ext)
 {
     std::replace(path.begin(), path.end(), CR_PATH_SEPARATOR_INVALID, CR_PATH_SEPARATOR);
-    auto sep_pos = path.rfind(CR_PATH_SEPARATOR);
-    auto dot_pos = path.rfind('.');
+    size_t sep_pos = path.rfind(CR_PATH_SEPARATOR);
+    size_t dot_pos = path.rfind('.');
 
     if (sep_pos == std::string::npos)
     {
@@ -801,8 +801,8 @@ static int  cr_plugin_main(cr_plugin& ctx, cr_op operation);
 
 void cr_set_temporary_path(cr_plugin& ctx, const std::string& path)
 {
-    auto pimpl      = (cr_internal*)ctx.p;
-    pimpl->temppath = path;
+    cr_internal* pimpl = (cr_internal*)ctx.p;
+    pimpl->temppath    = path;
 }
 
 #if defined(_WIN32)
@@ -919,15 +919,15 @@ static bool cr_pe_debugdir_rva(PIMAGE_OPTIONAL_HEADER optionalHeader, DWORD& deb
 {
     if (optionalHeader->Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
     {
-        auto optionalHeader64 = struct_cast<PIMAGE_OPTIONAL_HEADER64>(optionalHeader);
-        debugDirRva           = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
-        debugDirSize          = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+        _IMAGE_OPTIONAL_HEADER64* optionalHeader64 = struct_cast<PIMAGE_OPTIONAL_HEADER64>(optionalHeader);
+        debugDirRva  = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
+        debugDirSize = optionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
     }
     else
     {
-        auto optionalHeader32 = struct_cast<PIMAGE_OPTIONAL_HEADER32>(optionalHeader);
-        debugDirRva           = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
-        debugDirSize          = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+        _IMAGE_OPTIONAL_HEADER* optionalHeader32 = struct_cast<PIMAGE_OPTIONAL_HEADER32>(optionalHeader);
+        debugDirRva  = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
+        debugDirSize = optionalHeader32->DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
     }
 
     if (debugDirRva == 0 && debugDirSize == 0)
@@ -944,11 +944,11 @@ static bool cr_pe_debugdir_rva(PIMAGE_OPTIONAL_HEADER optionalHeader, DWORD& deb
 
 static bool cr_pe_fileoffset_rva(PIMAGE_NT_HEADERS ntHeaders, DWORD rva, DWORD& fileOffset)
 {
-    bool  found         = false;
-    auto* sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
+    bool                   found         = false;
+    _IMAGE_SECTION_HEADER* sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
     for (int i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, sectionHeader++)
     {
-        auto sectionSize = sectionHeader->Misc.VirtualSize;
+        DWORD sectionSize = sectionHeader->Misc.VirtualSize;
         if ((rva >= sectionHeader->VirtualAddress) && (rva < sectionHeader->VirtualAddress + sectionSize))
         {
             found = true;
@@ -969,8 +969,8 @@ static bool cr_pe_fileoffset_rva(PIMAGE_NT_HEADERS ntHeaders, DWORD rva, DWORD& 
 static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
 {
     CR_ASSERT(debugDir && imageBase);
-    LPBYTE     debugInfo     = imageBase + debugDir->PointerToRawData;
-    const auto debugInfoSize = debugDir->SizeOfData;
+    LPBYTE      debugInfo     = imageBase + debugDir->PointerToRawData;
+    const DWORD debugInfoSize = debugDir->SizeOfData;
     if (debugInfo == 0 || debugInfoSize == 0)
     {
         return nullptr;
@@ -988,10 +988,10 @@ static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
 
     if (debugDir->Type == IMAGE_DEBUG_TYPE_CODEVIEW)
     {
-        auto signature = *(DWORD*)debugInfo;
+        DWORD signature = *(DWORD*)debugInfo;
         if (signature == CR_RSDS_SIGNATURE)
         {
-            auto* info = (cr_rsds_hdr*)(debugInfo);
+            cr_rsds_hdr* info = (cr_rsds_hdr*)(debugInfo);
             if (IsBadReadPtr(debugInfo, sizeof(cr_rsds_hdr)))
             {
                 return nullptr;
@@ -1045,7 +1045,7 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
             break;
         }
 
-        auto dosHeader = struct_cast<PIMAGE_DOS_HEADER>(mem);
+        _IMAGE_DOS_HEADER* dosHeader = struct_cast<PIMAGE_DOS_HEADER>(mem);
         if (dosHeader == 0)
         {
             break;
@@ -1061,7 +1061,7 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
             break;
         }
 
-        auto ntHeaders = struct_cast<PIMAGE_NT_HEADERS>(dosHeader, dosHeader->e_lfanew);
+        _IMAGE_NT_HEADERS64* ntHeaders = struct_cast<PIMAGE_NT_HEADERS>(dosHeader, dosHeader->e_lfanew);
         if (ntHeaders == 0)
         {
             break;
@@ -1093,7 +1093,7 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
             break;
         }
 
-        auto sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
+        _IMAGE_SECTION_HEADER* sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
         if (IsBadReadPtr(sectionHeaders, ntHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER)))
         {
             break;
@@ -1117,7 +1117,7 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
             break;
         }
 
-        auto debugDir = struct_cast<PIMAGE_DEBUG_DIRECTORY>(mem, debugDirOffset);
+        _IMAGE_DEBUG_DIRECTORY* debugDir = struct_cast<PIMAGE_DEBUG_DIRECTORY>(mem, debugDirOffset);
         if (debugDir == 0)
         {
             break;
@@ -1144,7 +1144,7 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
             char* pdb = cr_pdb_find((LPBYTE)mem, debugDir);
             if (pdb)
             {
-                auto len = strlen(pdb);
+                size_t len = strlen(pdb);
                 if (len >= strlen(pdbname.c_str()))
                 {
                     orig_pdb = pdb;
@@ -1187,23 +1187,24 @@ bool static cr_pdb_process(const std::string& desination)
 #endif // _MSC_VER
 
 static void cr_pe_section_save(
-    cr_plugin&                ctx,
-    cr_plugin_section_type::e type,
-    int64_t                   vaddr,
-    int64_t                   base,
-    IMAGE_SECTION_HEADER&     shdr)
+    cr_plugin&                  ctx,
+    cr_plugin_section_type::e   type,
+    int64_t                     vaddr,
+    int64_t                     base,
+    const IMAGE_SECTION_HEADER* shdr)
 {
-    const auto   version  = cr_plugin_section_version::current;
-    auto         p        = (cr_internal*)ctx.p;
-    auto         data     = &p->data[type][version];
+    const cr_plugin_section_version::e version = cr_plugin_section_version::current;
+    cr_internal*                       p       = (cr_internal*)ctx.p;
+    cr_plugin_section*                 data    = &p->data[type][version];
+
     const size_t old_size = data->size;
     data->base            = base;
     data->ptr             = (char*)vaddr;
-    data->size            = shdr.SizeOfRawData;
-    data->data            = CR_REALLOC(data->data, shdr.SizeOfRawData);
-    if (old_size < shdr.SizeOfRawData)
+    data->size            = shdr->SizeOfRawData;
+    data->data            = CR_REALLOC(data->data, shdr->SizeOfRawData);
+    if (old_size < shdr->SizeOfRawData)
     {
-        memset((char*)data->data + old_size, '\0', shdr.SizeOfRawData - old_size);
+        memset((char*)data->data + old_size, '\0', shdr->SizeOfRawData - old_size);
     }
 }
 
@@ -1211,51 +1212,51 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
 {
     (void)imagefile;
     CR_ASSERT(handle);
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     if (p->mode == CR_DISABLE)
     {
         return true;
     }
-    auto ntHeaders      = ImageNtHeader(handle);
-    auto base           = ntHeaders->OptionalHeader.ImageBase;
-    auto sectionHeaders = (IMAGE_SECTION_HEADER*)(ntHeaders + 1);
-    bool result         = true;
+    _IMAGE_NT_HEADERS64*  ntHeaders      = ImageNtHeader(handle);
+    ULONGLONG             base           = ntHeaders->OptionalHeader.ImageBase;
+    IMAGE_SECTION_HEADER* sectionHeaders = (IMAGE_SECTION_HEADER*)(ntHeaders + 1);
+    bool                  result         = true;
     for (int i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
     {
-        auto          sectionHeader = sectionHeaders[i];
-        const int64_t size          = sectionHeader.SizeOfRawData;
-        if (!strcmp((const char*)sectionHeader.Name, ".state"))
+        const IMAGE_SECTION_HEADER* sectionHeader = &sectionHeaders[i];
+        const int64_t               size          = sectionHeader->SizeOfRawData;
+        if (!strcmp((const char*)sectionHeader->Name, ".state"))
         {
             if (ctx.version || rollback)
             {
                 result &= cr_plugin_section_validate(
                     ctx,
                     cr_plugin_section_type::state,
-                    base + sectionHeader.VirtualAddress,
+                    base + sectionHeader->VirtualAddress,
                     base,
                     size);
             }
             if (result)
             {
-                auto sec = cr_plugin_section_type::state;
-                cr_pe_section_save(ctx, sec, base + sectionHeader.VirtualAddress, base, sectionHeader);
+                cr_plugin_section_type::e sec = cr_plugin_section_type::state;
+                cr_pe_section_save(ctx, sec, base + sectionHeader->VirtualAddress, base, sectionHeader);
             }
         }
-        else if (!strcmp((const char*)sectionHeader.Name, ".bss"))
+        else if (!strcmp((const char*)sectionHeader->Name, ".bss"))
         {
             if (ctx.version || rollback)
             {
                 result &= cr_plugin_section_validate(
                     ctx,
                     cr_plugin_section_type::bss,
-                    base + sectionHeader.VirtualAddress,
+                    base + sectionHeader->VirtualAddress,
                     base,
                     size);
             }
             if (result)
             {
                 cr_plugin_section_type::e sec = cr_plugin_section_type::bss;
-                cr_pe_section_save(ctx, sec, base + sectionHeader.VirtualAddress, base, sectionHeader);
+                cr_pe_section_save(ctx, sec, base + sectionHeader->VirtualAddress, base, sectionHeader);
             }
         }
     }
@@ -1264,7 +1265,7 @@ static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const 
 
 static void cr_so_unload(cr_plugin& ctx)
 {
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     CR_ASSERT(p->handle);
     FreeLibrary((HMODULE)p->handle);
 }
@@ -1273,7 +1274,7 @@ static so_handle cr_so_load(const char* path)
 {
     WCHAR wpath[MAX_PATH];
     cr_windows_convert_path(path, wpath);
-    auto new_dll = LoadLibraryW(wpath);
+    HMODULE new_dll = LoadLibraryW(wpath);
     if (!new_dll)
     {
         CR_ERROR("Couldn't load plugin: %ld\n", GetLastError());
@@ -1284,7 +1285,7 @@ static so_handle cr_so_load(const char* path)
 static cr_plugin_main_func cr_so_symbol(so_handle handle)
 {
     CR_ASSERT(handle);
-    auto new_main = (cr_plugin_main_func)(void*)GetProcAddress(handle, CR_MAIN_FUNC);
+    cr_plugin_main_func new_main = (cr_plugin_main_func)(void*)GetProcAddress(handle, CR_MAIN_FUNC);
     if (!new_main)
     {
         CR_ERROR("Couldn't find plugin entry point: %ld\n", GetLastError());
@@ -1358,7 +1359,7 @@ static int cr_seh_filter(cr_plugin& ctx, unsigned long seh)
 
 static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
 {
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
 #if !defined(__MINGW32__)
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -1490,7 +1491,8 @@ bool cr_is_empty(const void* const buf, int64_t len)
     }
 
     bool r = false;
-    auto c = (const char* const)buf;
+
+    const char* const c = (const char* const)buf;
     for (int i = 0; i < len; ++i)
     {
         r |= c[i];
@@ -1948,8 +1950,8 @@ static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
 static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
 {
     CR_TRACE
-    auto       p    = (cr_internal*)ctx.p;
-    const auto file = p->fullname;
+    cr_internal*      p    = (cr_internal*)ctx.p;
+    const std::string file = p->fullname;
     if (cr_exists(file.c_str()) || rollback)
     {
         const auto old_file = cr_version_path(file, ctx.version, p->temppath);
@@ -1960,8 +1962,8 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
             return false;
         }
 
-        auto new_version = rollback ? ctx.version : ctx.next_version;
-        auto new_file    = cr_version_path(file, new_version, p->temppath);
+        unsigned int new_version = rollback ? ctx.version : ctx.next_version;
+        std::string  new_file    = cr_version_path(file, new_version, p->temppath);
         if (rollback)
         {
             if (ctx.version == 0)
@@ -1990,7 +1992,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
 #endif // defined(_MSC_VER)
         }
 
-        auto new_dll = cr_so_load(new_file.c_str());
+        so_handle new_dll = cr_so_load(new_file.c_str());
         if (!new_dll)
         {
             ctx.failure = CR_BAD_IMAGE;
@@ -2011,15 +2013,15 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
             cr_plugin_sections_reload(ctx, cr_plugin_section_version::current);
         }
 
-        auto new_main = cr_so_symbol(new_dll);
+        cr_plugin_main_func new_main = cr_so_symbol(new_dll);
         if (!new_main)
         {
             return false;
         }
 
-        auto p2    = (cr_internal*)ctx.p;
-        p2->handle = new_dll;
-        p2->main   = new_main;
+        cr_internal* p2 = (cr_internal*)ctx.p;
+        p2->handle      = new_dll;
+        p2->main        = new_main;
         if (ctx.failure != CR_BAD_IMAGE)
         {
             p2->timestamp = cr_last_write_time(file);
@@ -2039,7 +2041,7 @@ static bool
 cr_plugin_section_validate(cr_plugin& ctx, cr_plugin_section_type::e type, intptr_t ptr, intptr_t base, int64_t size)
 {
     CR_TRACE(void) ptr;
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     switch (p->mode)
     {
     case CR_SAFE:
@@ -2058,7 +2060,7 @@ cr_plugin_section_validate(cr_plugin& ctx, cr_plugin_section_type::e type, intpt
 // internal
 static void cr_plugin_sections_backup(cr_plugin& ctx)
 {
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     if (p->mode == CR_DISABLE)
     {
         return;
@@ -2067,18 +2069,18 @@ static void cr_plugin_sections_backup(cr_plugin& ctx)
 
     for (int i = 0; i < cr_plugin_section_type::count; ++i)
     {
-        auto cur = &p->data[i][cr_plugin_section_version::current];
+        cr_plugin_section* cur = &p->data[i][cr_plugin_section_version::current];
         if (cur->ptr)
         {
-            auto bkp  = &p->data[i][cr_plugin_section_version::backup];
-            bkp->data = CR_REALLOC(bkp->data, cur->size);
-            bkp->ptr  = cur->ptr;
-            bkp->size = cur->size;
-            bkp->base = cur->base;
+            cr_plugin_section* bkp = &p->data[i][cr_plugin_section_version::backup];
+            bkp->data              = CR_REALLOC(bkp->data, cur->size);
+            bkp->ptr               = cur->ptr;
+            bkp->size              = cur->size;
+            bkp->base              = cur->base;
 
             if (bkp->data)
             {
-                std::memcpy(bkp->data, cur->data, bkp->size);
+                memcpy(bkp->data, cur->data, bkp->size);
             }
         }
     }
@@ -2092,21 +2094,21 @@ static void cr_plugin_sections_backup(cr_plugin& ctx)
 // and compatible copy of the state for the previous version of the plugin.
 static void cr_plugin_sections_store(cr_plugin& ctx)
 {
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     if (p->mode == CR_DISABLE)
     {
         return;
     }
     CR_TRACE
 
-    auto version = cr_plugin_section_version::current;
+    cr_plugin_section_version::e version = cr_plugin_section_version::current;
     for (int i = 0; i < cr_plugin_section_type::count; ++i)
     {
         if (p->data[i][version].ptr && p->data[i][version].data)
         {
             const char*   ptr = p->data[i][version].ptr;
             const int64_t len = p->data[i][version].size;
-            std::memcpy(p->data[i][version].data, ptr, len);
+            memcpy(p->data[i][version].data, ptr, len);
         }
     }
 
@@ -2119,7 +2121,7 @@ static void cr_plugin_sections_store(cr_plugin& ctx)
 static void cr_plugin_sections_reload(cr_plugin& ctx, cr_plugin_section_version::e version)
 {
     CR_ASSERT(version < cr_plugin_section_version::count);
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     if (p->mode == CR_DISABLE)
     {
         return;
@@ -2133,12 +2135,11 @@ static void cr_plugin_sections_reload(cr_plugin& ctx, cr_plugin_section_version:
             const int64_t len = p->data[i][version].size;
             // restore backup into the current section address as it may
             // change due aslr and backup address may be invalid
-            const auto current = cr_plugin_section_version::current;
-            auto       dest    = (void*)p->data[i][current].ptr;
+            const cr_plugin_section_version::e current = cr_plugin_section_version::current;
+
+            void* dest = (void*)p->data[i][current].ptr;
             if (dest)
-            {
-                std::memcpy(dest, p->data[i][version].data, len);
-            }
+                memcpy(dest, p->data[i][version].data, len);
         }
     }
 }
@@ -2149,7 +2150,7 @@ static void cr_plugin_sections_reload(cr_plugin& ctx, cr_plugin_section_version:
 static void cr_so_sections_free(cr_plugin& ctx)
 {
     CR_TRACE
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
     for (int i = 0; i < cr_plugin_section_type::count; ++i)
     {
         for (int v = 0; v < cr_plugin_section_version::count; ++v)
@@ -2165,9 +2166,9 @@ static void cr_so_sections_free(cr_plugin& ctx)
 
 static bool cr_plugin_changed(cr_plugin& ctx)
 {
-    auto       p   = (cr_internal*)ctx.p;
-    const auto src = cr_last_write_time(p->fullname);
-    const auto cur = p->timestamp;
+    cr_internal* p   = (cr_internal*)ctx.p;
+    const time_t src = cr_last_write_time(p->fullname);
+    const time_t cur = p->timestamp;
     return src > cur;
 }
 
@@ -2181,8 +2182,8 @@ static bool cr_plugin_changed(cr_plugin& ctx)
 static int cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close)
 {
     CR_TRACE
-    auto p = (cr_internal*)ctx.p;
-    int  r = 0;
+    cr_internal* p = (cr_internal*)ctx.p;
+    int          r = 0;
     if (p->handle)
     {
         if (!rollback)
@@ -2212,7 +2213,7 @@ static int cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close)
 static bool cr_plugin_rollback(cr_plugin& ctx)
 {
     CR_TRACE
-    auto loaded = cr_plugin_load_internal(ctx, true);
+    bool loaded = cr_plugin_load_internal(ctx, true);
     if (loaded)
     {
         loaded = cr_plugin_main(ctx, CR_LOAD) >= 0;
@@ -2296,7 +2297,7 @@ extern "C" bool cr_plugin_open(cr_plugin& ctx, const char* fullpath)
     {
         return false;
     }
-    auto p                   = new (CR_MALLOC(sizeof(cr_internal))) cr_internal;
+    cr_internal* p           = new (CR_MALLOC(sizeof(cr_internal))) cr_internal;
     p->mode                  = CR_OP_MODE;
     p->fullname              = fullpath;
     ctx.p                    = p;
@@ -2319,10 +2320,10 @@ extern "C" void cr_plugin_close(cr_plugin& ctx)
     const bool close    = true;
     cr_plugin_unload(ctx, rollback, close);
     cr_so_sections_free(ctx);
-    auto p = (cr_internal*)ctx.p;
+    cr_internal* p = (cr_internal*)ctx.p;
 
     // delete backups
-    const auto file = p->fullname;
+    const std::string file = p->fullname;
     for (unsigned int i = 0; i < ctx.version; i++)
     {
         cr_del(cr_version_path(file, i, p->temppath).c_str());
