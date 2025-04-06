@@ -24,34 +24,38 @@ static unsigned int CR_STATE version = 1;
 // poping a dialog box asking to force reload cleaning up states (restarting the
 // client from scratch with the new version).
 
-void hello() {
+void hello()
+{
     // this demonstrate how to transfer an state between instances by using
     // CR_STATE tag. in this case, we track a flag to indicate if hello was
     // print or not, so each new reload after the initial one will not print the
     // hello world message.
     static bool CR_STATE said_hello = false;
-    if (!said_hello) {
+    if (!said_hello)
+    {
         said_hello = true;
         fprintf(stdout, "hello world! ");
     }
     static int skip = 0;
     if (++skip % 50 == 0)
-        fprintf(stdout, "z");
+        fprintf(stdout, "a");
 }
 
-void test_crash() {
-    int *addr = NULL;
+void test_crash()
+{
+    int* addr = NULL;
     (void)addr; // warning
     // to test crash protection, uncomment the following line
     // int i = *addr;
 }
 
-CR_EXPORT int cr_main(struct cr_plugin *ctx, enum cr_op operation) {
+CR_EXPORT int cr_main(struct cr_plugin* ctx, enum cr_op operation)
+{
     assert(ctx);
-    if (operation != CR_STEP) {
-        fprintf(stdout, "OP: %s(%d)\n",
-                operation == CR_LOAD ? "LOAD" : "UNLOAD", ctx->version);
-        int *addr = NULL;
+    if (operation != CR_STEP)
+    {
+        fprintf(stdout, "OP: %s(%d)\n", operation == CR_LOAD ? "LOAD" : "UNLOAD", ctx->version);
+        int* addr = NULL;
         (void)addr; // warning
         // to test crash protection during load
         // int i = *addr;
@@ -61,13 +65,13 @@ CR_EXPORT int cr_main(struct cr_plugin *ctx, enum cr_op operation) {
     // crash protection may cause the version to decrement. So we can test
     // current version against one tracked between instances with CR_STATE to
     // signal that we're not running the most recent instance.
-    if (ctx->version < version) {
+    if (ctx->version < version)
+    {
         // a failure code is acessible in the `failure` variable from the
         // `cr_plugin` context. on windows this is the structured exception
         // error code, for more info:
         //      https://msdn.microsoft.com/en-us/library/windows/desktop/ms679356(v=vs.85).aspx
-        fprintf(stdout, "A rollback happened due to failure: %x!\n",
-                ctx->failure);
+        fprintf(stdout, "A rollback happened due to failure: %x!\n", ctx->failure);
     }
     version = ctx->version;
 
@@ -76,7 +80,8 @@ CR_EXPORT int cr_main(struct cr_plugin *ctx, enum cr_op operation) {
     // state (true), and then we can print the loaded instance version one time
     // only by instance version.
     static bool print_version = true;
-    if (print_version) {
+    if (print_version)
+    {
         fprintf(stdout, "loaded version: %d\n", ctx->version);
 
         // disable further printing for this instance only
