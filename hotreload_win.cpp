@@ -1,34 +1,43 @@
+#define xassert(cond) (cond) ? (void)0 : __debugbreak();
+
+#define CR_ASSERT xassert
+
 #define CR_HOST CR_UNSAFE // try to best manage static states
-#define UNICODE
 
 #include <cstdio>
 
 #include <cr.h>
 
-#define xassert(cond) (cond) ? (void)0 : __debugbreak();
-
 BYTE infobuffer[1024 * 32];
 
-struct {
+struct
+{
     LARGE_INTEGER freq, start;
 } g_Timer;
 
-static inline INT64 GetNowNS() {
+static inline INT64 GetNowNS()
+{
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     now.QuadPart -= g_Timer.start.QuadPart;
-    INT64 q = now.QuadPart / g_Timer.freq.QuadPart;
-    INT64 r = now.QuadPart % g_Timer.freq.QuadPart;
+    INT64 q       = now.QuadPart / g_Timer.freq.QuadPart;
+    INT64 r       = now.QuadPart % g_Timer.freq.QuadPart;
     return q * 1000000000 + r * 1000000000 / g_Timer.freq.QuadPart;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[])
+{
     QueryPerformanceFrequency(&g_Timer.freq);
     QueryPerformanceCounter(&g_Timer.start);
 
     HANDLE hDirectory = CreateFileW(
-        TEXT(HOTRELOAD_WATCH_DIR), FILE_LIST_DIRECTORY, FILE_SHARE_READ, NULL,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
+        TEXT(HOTRELOAD_WATCH_DIR),
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        NULL);
     xassert(hDirectory);
 
     // Setup overlapped
@@ -37,9 +46,16 @@ int main(int argc, char *argv[]) {
 
     // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw
     BOOL success = ReadDirectoryChangesW(
-        hDirectory, infobuffer, sizeof(infobuffer), TRUE,
-        FILE_NOTIFY_CHANGE_LAST_WRITE, NULL, &overlapped, NULL);
-    if (!success) {
+        hDirectory,
+        infobuffer,
+        sizeof(infobuffer),
+        TRUE,
+        FILE_NOTIFY_CHANGE_LAST_WRITE,
+        NULL,
+        &overlapped,
+        NULL);
+    if (!success)
+    {
         fprintf(stderr, "Failed to queue info buffer\n");
         return 1;
     }
@@ -50,70 +66,76 @@ int main(int argc, char *argv[]) {
     cr_plugin_open(ctx, HOTRELOAD_LIB_PATH);
     // call the plugin update function with the plugin context to execute it
     // at any frequency matters to you
-    while (true) {
+    while (true)
+    {
         cr_plugin_update(ctx);
         fflush(stdout);
         fflush(stderr);
         Sleep(10);
 
         DWORD result = WaitForSingleObject(overlapped.hEvent, 0);
-        if (result == WAIT_OBJECT_0) {
+        if (result == WAIT_OBJECT_0)
+        {
             DWORD bytes_transferred;
-            GetOverlappedResult(hDirectory, &overlapped, &bytes_transferred,
-                                TRUE);
+            GetOverlappedResult(hDirectory, &overlapped, &bytes_transferred, TRUE);
 
-            bool files_changed = false;
-            FILE_NOTIFY_INFORMATION *event =
-                (FILE_NOTIFY_INFORMATION *)infobuffer;
+            bool                     files_changed = false;
+            FILE_NOTIFY_INFORMATION* event         = (FILE_NOTIFY_INFORMATION*)infobuffer;
 
-            while (TRUE) {
+            while (TRUE)
+            {
                 DWORD name_len = event->FileNameLength / sizeof(wchar_t);
 
-                if (event->Action == FILE_ACTION_MODIFIED) {
-                    fwprintf(stderr, L"File changed: %.*s\n", name_len,
-                             event->FileName);
+                if (event->Action == FILE_ACTION_MODIFIED)
+                {
+                    fwprintf(stderr, L"File changed: %.*s\n", name_len, event->FileName);
                     files_changed = true;
                 }
 
                 // Iterate events
                 if (event->NextEntryOffset)
-                    *((BYTE **)&event) += event->NextEntryOffset;
+                    *((BYTE**)&event) += event->NextEntryOffset;
                 else
                     break;
             }
 
             // Queue next event
             success = ReadDirectoryChangesW(
-                hDirectory, infobuffer, sizeof(infobuffer), TRUE,
-                FILE_NOTIFY_CHANGE_LAST_WRITE, NULL, &overlapped, NULL);
+                hDirectory,
+                infobuffer,
+                sizeof(infobuffer),
+                TRUE,
+                FILE_NOTIFY_CHANGE_LAST_WRITE,
+                NULL,
+                &overlapped,
+                NULL);
 
-            if (!success) {
+            if (!success)
+            {
                 fprintf(stderr, "Failed to queue info buffer\n");
                 return 1;
             }
 
-            if (files_changed) {
-                STARTUPINFO si;
+            if (files_changed)
+            {
+                STARTUPINFO         si;
                 PROCESS_INFORMATION pi;
                 memset(&si, 0, sizeof(si));
                 memset(&pi, 0, sizeof(pi));
 
-                si.cb = sizeof(si);
-                si.dwFlags =
-                    STARTF_USESHOWWINDOW; // These flags are necessarry to stop
-                                          // a terminal window popping up as it
-                si.wShowWindow = SW_HIDE; // runs the command
+                si.cb      = sizeof(si);
+                si.dwFlags = STARTF_USESHOWWINDOW; // These flags are necessarry to stop
+                                                   // a terminal window popping up as it
+                si.wShowWindow = SW_HIDE;          // runs the command
 
                 UINT64 buildStart = GetNowNS();
                 // Run build command in child process.
                 WCHAR cmdbuf[256];
                 DWORD exitCode = 0;
-                wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf),
-                         TEXT(HOTRELOAD_BUILD_COMMAND));
-                if (!CreateProcessW(0, cmdbuf, 0, 0, FALSE, CREATE_NEW_CONSOLE,
-                                    0, 0, &si, &pi)) {
-                    fprintf(stderr, "CreateProcess failed (%lu).\n",
-                            GetLastError());
+                wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf), TEXT(HOTRELOAD_BUILD_COMMAND));
+                if (!CreateProcessW(0, cmdbuf, 0, 0, FALSE, CREATE_NEW_CONSOLE, 0, 0, &si, &pi))
+                {
+                    fprintf(stderr, "CreateProcess failed (%lu).\n", GetLastError());
                     return 1;
                 }
 
@@ -126,11 +148,12 @@ int main(int argc, char *argv[]) {
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
 
-                if (exitCode != 0) {
-                    fprintf(stderr,
-                            "[WARNING] Rebuild failed. Exited with code: %lu\n",
-                            exitCode);
-                } else {
+                if (exitCode != 0)
+                {
+                    fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %lu\n", exitCode);
+                }
+                else
+                {
                     UINT64 reloadEnd = GetNowNS();
 
                     double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;

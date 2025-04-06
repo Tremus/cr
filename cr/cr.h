@@ -629,17 +629,17 @@ struct cr_plugin
 
 #ifndef CR_REALLOC
 #include <stdlib.h>
-#define CR_REALLOC(ptr, size) ::realloc(ptr, size)
+#define CR_REALLOC(ptr, size) realloc(ptr, size)
 #endif
 
 #ifndef CR_FREE
 #include <stdlib.h>
-#define CR_FREE(ptr) ::free(ptr)
+#define CR_FREE(ptr) free(ptr)
 #endif
 
 #ifndef CR_MALLOC
 #include <stdlib.h>
-#define CR_MALLOC(size) ::malloc(size)
+#define CR_MALLOC(size) malloc(size)
 #endif
 
 #if defined(_MSC_VER)
@@ -656,9 +656,7 @@ struct cr_plugin
 #define CR_OP_MODE CR_HOST
 #endif
 
-#include <algorithm>
-#include <memory> // unique_ptr
-#include <string>
+#include <stdint.h>
 
 #if defined(_WIN32)
 #define CR_PATH_SEPARATOR         '\\'
@@ -689,58 +687,13 @@ const char* cr_path_get_extension(const char* path)
     return ext;
 }
 
-static void cr_split_path(std::string path, std::string& parent_dir, std::string& base_name, std::string& ext)
+static int cr_version_path(const char* basepath, unsigned version, char* outbuf, size_t outbuflen)
 {
-    std::replace(path.begin(), path.end(), CR_PATH_SEPARATOR_INVALID, CR_PATH_SEPARATOR);
-    size_t sep_pos = path.rfind(CR_PATH_SEPARATOR);
-    size_t dot_pos = path.rfind('.');
-
-    if (sep_pos == std::string::npos)
-    {
-        parent_dir = "";
-        if (dot_pos == std::string::npos)
-        {
-            ext       = "";
-            base_name = path;
-        }
-        else
-        {
-            ext       = path.substr(dot_pos);
-            base_name = path.substr(0, dot_pos);
-        }
-    }
-    else
-    {
-        parent_dir = path.substr(0, sep_pos + 1);
-        if (dot_pos == std::string::npos || sep_pos > dot_pos)
-        {
-            ext       = "";
-            base_name = path.substr(sep_pos + 1);
-        }
-        else
-        {
-            ext       = path.substr(dot_pos);
-            base_name = path.substr(sep_pos + 1, dot_pos - sep_pos - 1);
-        }
-    }
-}
-
-static std::string cr_version_path(const std::string& basepath, unsigned version)
-{
-    std::string folder, fname, ext;
-    cr_split_path(basepath, folder, fname, ext);
-    std::string ver = std::to_string(version);
-#if defined(_MSC_VER)
-    // When patching PDB file path in library file we will drop path and leave
-    // only file name. Length of path is extra space for version number. Trim
-    // file name only if version number length exceeds pdb folder path length.
-    // This is not relevant on other platforms.
-    if (ver.size() > folder.size())
-    {
-        fname = fname.substr(0, fname.size() - (ver.size() - folder.size() - 1));
-    }
-#endif
-    return folder + fname + ver + ext;
+    const char* name = cr_path_get_filename(basepath);
+    CR_ASSERT(name);
+    const char* ext = cr_path_get_extension(name);
+    CR_ASSERT(ext);
+    return snprintf(outbuf, outbuflen, "%.*s%u%s", (int)(ext - basepath), basepath, version, ext);
 }
 
 namespace cr_plugin_section_type
@@ -782,7 +735,7 @@ struct cr_plugin_segment
 // with by user
 struct cr_internal
 {
-    std::string         fullname                                                              = {};
+    char                filepath[1024];
     time_t              timestamp                                                             = {};
     void*               handle                                                                = nullptr;
     cr_plugin_main_func main                                                                  = nullptr;
@@ -887,13 +840,6 @@ static void cr_del(const char* path)
 #include <limits.h>
 #include <stdio.h>
 #include <tchar.h>
-
-static std::string cr_replace_extension(const std::string& filepath, const std::string& ext)
-{
-    std::string folder, filename, old_ext;
-    cr_split_path(filepath, folder, filename, old_ext);
-    return folder + filename + ext;
-}
 
 template <class T>
 static T struct_cast(void* ptr, LONG offset = 0)
@@ -1211,7 +1157,7 @@ static void cr_pe_section_save(
     }
 }
 
-static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const std::string& imagefile, bool rollback)
+static bool cr_plugin_validate_sections(cr_plugin& ctx, so_handle handle, const char* imagefile, bool rollback)
 {
     (void)imagefile;
     CR_ASSERT(handle);
@@ -1953,9 +1899,8 @@ static int cr_plugin_main(cr_plugin& ctx, cr_op operation)
 static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
 {
     CR_TRACE
-    cr_internal*      p    = (cr_internal*)ctx.p;
-    const std::string file = p->fullname;
-    if (cr_exists(file.c_str()) || rollback)
+    cr_internal* p = (cr_internal*)ctx.p;
+    if (cr_exists(p->filepath) || rollback)
     {
         if (ctx.version)
         {
@@ -1966,7 +1911,8 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
             return false;
 
         unsigned int new_version = rollback ? ctx.version : ctx.next_version;
-        std::string  new_file    = cr_version_path(file, new_version);
+        char         new_file[1024];
+        cr_version_path(p->filepath, new_version, new_file, sizeof(new_file));
         if (rollback)
         {
             if (ctx.version == 0)
@@ -1981,13 +1927,13 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
         {
             // Save current version for rollback.
             ctx.last_working_version = ctx.version;
-            cr_copy(file.c_str(), new_file.c_str());
+            cr_copy(p->filepath, new_file);
 
             // Update `next_version` for use by the next reload.
             ctx.next_version = new_version + 1;
 
 #if defined(_MSC_VER)
-            if (!cr_pdb_process(new_file.c_str()))
+            if (!cr_pdb_process(new_file))
             {
                 CR_ERROR("Couldn't process PDB, debugging may be "
                          "affected and/or reload may fail\n");
@@ -1995,7 +1941,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
 #endif // defined(_MSC_VER)
         }
 
-        so_handle new_dll = cr_so_load(new_file.c_str());
+        so_handle new_dll = cr_so_load(new_file);
         if (!new_dll)
         {
             ctx.failure = CR_BAD_IMAGE;
@@ -2027,10 +1973,10 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
         p2->main        = new_main;
         if (ctx.failure != CR_BAD_IMAGE)
         {
-            p2->timestamp = cr_last_write_time(file.c_str());
+            p2->timestamp = cr_last_write_time(p->filepath);
         }
         ctx.version = new_version;
-        CR_LOG("loaded: %s (version: %d)\n", new_file.c_str(), ctx.version);
+        CR_LOG("loaded: %s (version: %d)\n", new_file, ctx.version);
     }
     else
     {
@@ -2170,7 +2116,7 @@ static void cr_so_sections_free(cr_plugin& ctx)
 static bool cr_plugin_changed(cr_plugin& ctx)
 {
     cr_internal* p   = (cr_internal*)ctx.p;
-    const time_t src = cr_last_write_time(p->fullname.c_str());
+    const time_t src = cr_last_write_time(p->filepath);
     const time_t cur = p->timestamp;
     return src > cur;
 }
@@ -2292,17 +2238,17 @@ extern "C" int cr_plugin_update(cr_plugin& ctx, bool reloadCheck = true)
 }
 
 // Loads a plugin from the specified full path (or current directory if NULL).
-extern "C" bool cr_plugin_open(cr_plugin& ctx, const char* fullpath)
+extern "C" bool cr_plugin_open(cr_plugin& ctx, const char* path)
 {
     CR_TRACE
-    CR_ASSERT(fullpath);
-    if (!cr_exists(fullpath))
+    CR_ASSERT(path);
+    if (!cr_exists(path))
     {
         return false;
     }
-    cr_internal* p           = new (CR_MALLOC(sizeof(cr_internal))) cr_internal;
-    p->mode                  = CR_OP_MODE;
-    p->fullname              = fullpath;
+    cr_internal* p = (cr_internal*)calloc(1, sizeof(*p));
+    p->mode        = CR_OP_MODE;
+    snprintf(p->filepath, sizeof(p->filepath), "%s", path);
     ctx.p                    = p;
     ctx.next_version         = 1;
     ctx.last_working_version = 0;
@@ -2326,17 +2272,19 @@ extern "C" void cr_plugin_close(cr_plugin& ctx)
     cr_internal* p = (cr_internal*)ctx.p;
 
     // delete backups
-    const std::string& file = p->fullname;
     for (unsigned int i = 0; i < ctx.version; i++)
     {
-        cr_del(cr_version_path(file, i).c_str());
+        char scratchpath[1024];
+        cr_version_path(p->filepath, i, scratchpath, sizeof(scratchpath));
+        cr_del(scratchpath);
 #if defined(_MSC_VER)
-        cr_del(cr_replace_extension(cr_version_path(file, i), ".pdb").c_str());
+        const char* ext = cr_path_get_extension(scratchpath);
+        strcpy((char*)ext, ".pdb");
+        cr_del(scratchpath);
 #endif
     }
 
-    p->~cr_internal();
-    CR_FREE(p);
+    free(p);
     ctx.p       = nullptr;
     ctx.version = 0;
 }
