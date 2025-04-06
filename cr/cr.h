@@ -213,19 +213,6 @@ Return
 
 - `true` in case of success, `false` otherwise.
 
-#### `void cr_set_temporary_path(cr_plugin& ctx, const std::string &path)`
-
-Sets temporary path to which temporary copies of plugin will be placed. Should
-be called immediately after `cr_plugin_open()`. If `temporary` path is not set,
-temporary copies of the file will be copied to the same directory where the
-original file is located.
-
-Arguments
-
-- `ctx` a context that will manage the plugin internal data and user data.
-- `path` a full path to an existing directory which will be used for storing
-temporary plugin copies.
-
 #### `int cr_plugin_update(cr_plugin &ctx, bool reloadCheck = true)`
 
 This function will call the plugin `cr_main` function. It should be called as
@@ -681,6 +668,27 @@ struct cr_plugin
 #define CR_PATH_SEPARATOR_INVALID '\\'
 #endif
 
+const char* cr_path_get_filename(const char* path)
+{
+    const char* filename = NULL;
+    for (const char* c = path; *c != 0; c++)
+    {
+        if (*c == CR_PATH_SEPARATOR)
+            filename = c + 1;
+    }
+    return filename;
+}
+const char* cr_path_get_extension(const char* path)
+{
+    const char* ext = NULL;
+    for (const char* c = path; *c != 0; c++)
+    {
+        if (*c == '.')
+            ext = c;
+    }
+    return ext;
+}
+
 static void cr_split_path(std::string path, std::string& parent_dir, std::string& base_name, std::string& ext)
 {
     std::replace(path.begin(), path.end(), CR_PATH_SEPARATOR_INVALID, CR_PATH_SEPARATOR);
@@ -717,7 +725,7 @@ static void cr_split_path(std::string path, std::string& parent_dir, std::string
     }
 }
 
-static std::string cr_version_path(const std::string& basepath, unsigned version, const std::string& temppath)
+static std::string cr_version_path(const std::string& basepath, unsigned version)
 {
     std::string folder, fname, ext;
     cr_split_path(basepath, folder, fname, ext);
@@ -732,10 +740,6 @@ static std::string cr_version_path(const std::string& basepath, unsigned version
         fname = fname.substr(0, fname.size() - (ver.size() - folder.size() - 1));
     }
 #endif
-    if (!temppath.empty())
-    {
-        folder = temppath;
-    }
     return folder + fname + ver + ext;
 }
 
@@ -779,7 +783,6 @@ struct cr_plugin_segment
 struct cr_internal
 {
     std::string         fullname                                                              = {};
-    std::string         temppath                                                              = {};
     time_t              timestamp                                                             = {};
     void*               handle                                                                = nullptr;
     cr_plugin_main_func main                                                                  = nullptr;
@@ -798,12 +801,6 @@ static int  cr_plugin_unload(cr_plugin& ctx, bool rollback, bool close);
 static bool cr_plugin_changed(cr_plugin& ctx);
 static bool cr_plugin_rollback(cr_plugin& ctx);
 static int  cr_plugin_main(cr_plugin& ctx, cr_op operation);
-
-void cr_set_temporary_path(cr_plugin& ctx, const std::string& path)
-{
-    cr_internal* pimpl = (cr_internal*)ctx.p;
-    pimpl->temppath    = path;
-}
 
 #if defined(_WIN32)
 
@@ -831,10 +828,10 @@ static int cr_windows_convert_path(const char* in, wchar_t* out)
     return num;
 }
 
-static time_t cr_last_write_time(const std::string& path)
+static time_t cr_last_write_time(const char* path)
 {
     WCHAR wpath[MAX_PATH];
-    cr_windows_convert_path(path.c_str(), wpath);
+    cr_windows_convert_path(path, wpath);
 
     WIN32_FILE_ATTRIBUTE_DATA fad;
     if (!GetFileAttributesExW(wpath, GetFileExInfoStandard, &fad))
@@ -1009,10 +1006,10 @@ static char* cr_pdb_find(LPBYTE imageBase, PIMAGE_DEBUG_DIRECTORY debugDir)
     return nullptr;
 }
 
-static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std::string& orig_pdb)
+static bool cr_pdb_replace(const char* next_path_dll, const char* pdbname, char orig_pdb[MAX_PATH])
 {
-    WCHAR wfilename[MAX_PATH];
-    cr_windows_convert_path(filename, wfilename);
+    WCHAR wpath[MAX_PATH];
+    cr_windows_convert_path(next_path_dll, wpath);
 
     HANDLE fp      = nullptr;
     HANDLE filemap = nullptr;
@@ -1021,7 +1018,7 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
     do
     {
         fp = CreateFileW(
-            wfilename,
+            wpath,
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ,
             nullptr,
@@ -1144,13 +1141,14 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
             char* pdb = cr_pdb_find((LPBYTE)mem, debugDir);
             if (pdb)
             {
-                size_t len = strlen(pdb);
-                if (len >= strlen(pdbname.c_str()))
+                size_t pdb_strlen     = strlen(pdb);
+                size_t pdbname_strlen = strlen(pdbname);
+                if (pdb_strlen >= pdbname_strlen)
                 {
-                    orig_pdb = pdb;
-                    memcpy_s(pdb, len, pdbname.c_str(), pdbname.length());
-                    pdb[pdbname.length()] = 0;
-                    result                = true;
+                    snprintf(orig_pdb, MAX_PATH, "%s", pdb);
+                    memcpy_s(pdb, pdb_strlen, pdbname, pdbname_strlen);
+                    pdb[pdbname_strlen] = 0;
+                    result              = true;
                 }
             }
         }
@@ -1175,13 +1173,18 @@ static bool cr_pdb_replace(const char* filename, const std::string& pdbname, std
     return result;
 }
 
-bool static cr_pdb_process(const std::string& desination)
+bool static cr_pdb_process(const char* next_path_dll)
 {
-    std::string folder, fname, ext, orig_pdb, next_pdb;
-    cr_split_path(desination, folder, fname, ext);
-    bool result  = cr_pdb_replace(desination.c_str(), fname + ".pdb", orig_pdb);
-    next_pdb     = cr_replace_extension(desination, ".pdb");
-    result      &= cr_copy(orig_pdb.c_str(), next_pdb.c_str());
+    char orig_pdb[MAX_PATH];
+    char next_pdb[MAX_PATH];
+
+    const char* dest_filename = cr_path_get_filename(next_path_dll);
+    CR_ASSERT(dest_filename);
+    const char* dest_ext = cr_path_get_extension(dest_filename);
+
+    bool result = cr_pdb_replace(next_path_dll, dest_filename, orig_pdb);
+    snprintf(next_pdb, sizeof(next_pdb), "%.*s.pdb", (int)(dest_ext - next_path_dll), next_path_dll);
+    result &= cr_copy(orig_pdb, next_pdb);
     return result;
 }
 #endif // _MSC_VER
@@ -1954,16 +1957,16 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
     const std::string file = p->fullname;
     if (cr_exists(file.c_str()) || rollback)
     {
-        const auto old_file = cr_version_path(file, ctx.version, p->temppath);
-        CR_LOG("unload '%s' with rollback: %d\n", old_file.c_str(), rollback);
+        if (ctx.version)
+        {
+            CR_LOG("unload version #%u with rollback: %d\n", ctx.version, rollback);
+        }
         int r = cr_plugin_unload(ctx, rollback, false);
         if (r < 0)
-        {
             return false;
-        }
 
         unsigned int new_version = rollback ? ctx.version : ctx.next_version;
-        std::string  new_file    = cr_version_path(file, new_version, p->temppath);
+        std::string  new_file    = cr_version_path(file, new_version);
         if (rollback)
         {
             if (ctx.version == 0)
@@ -1984,7 +1987,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
             ctx.next_version = new_version + 1;
 
 #if defined(_MSC_VER)
-            if (!cr_pdb_process(new_file))
+            if (!cr_pdb_process(new_file.c_str()))
             {
                 CR_ERROR("Couldn't process PDB, debugging may be "
                          "affected and/or reload may fail\n");
@@ -2024,7 +2027,7 @@ static bool cr_plugin_load_internal(cr_plugin& ctx, bool rollback)
         p2->main        = new_main;
         if (ctx.failure != CR_BAD_IMAGE)
         {
-            p2->timestamp = cr_last_write_time(file);
+            p2->timestamp = cr_last_write_time(file.c_str());
         }
         ctx.version = new_version;
         CR_LOG("loaded: %s (version: %d)\n", new_file.c_str(), ctx.version);
@@ -2167,7 +2170,7 @@ static void cr_so_sections_free(cr_plugin& ctx)
 static bool cr_plugin_changed(cr_plugin& ctx)
 {
     cr_internal* p   = (cr_internal*)ctx.p;
-    const time_t src = cr_last_write_time(p->fullname);
+    const time_t src = cr_last_write_time(p->fullname.c_str());
     const time_t cur = p->timestamp;
     return src > cur;
 }
@@ -2323,12 +2326,12 @@ extern "C" void cr_plugin_close(cr_plugin& ctx)
     cr_internal* p = (cr_internal*)ctx.p;
 
     // delete backups
-    const std::string file = p->fullname;
+    const std::string& file = p->fullname;
     for (unsigned int i = 0; i < ctx.version; i++)
     {
-        cr_del(cr_version_path(file, i, p->temppath).c_str());
+        cr_del(cr_version_path(file, i).c_str());
 #if defined(_MSC_VER)
-        cr_del(cr_replace_extension(cr_version_path(file, i, p->temppath), ".pdb").c_str());
+        cr_del(cr_replace_extension(cr_version_path(file, i), ".pdb").c_str());
 #endif
     }
 

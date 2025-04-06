@@ -38,7 +38,7 @@ void hello()
     }
     static int skip = 0;
     if (++skip % 50 == 0)
-        fprintf(stdout, "wow");
+        fprintf(stdout, "z");
 }
 
 void test_crash()
