@@ -118,22 +118,34 @@ int main(int argc, char* argv[])
 
             if (files_changed)
             {
-                STARTUPINFO         si;
-                PROCESS_INFORMATION pi;
-                memset(&si, 0, sizeof(si));
-                memset(&pi, 0, sizeof(pi));
+                STARTUPINFO         si = {0};
+                PROCESS_INFORMATION pi = {0};
+                SECURITY_ATTRIBUTES sa = {0};
+                HANDLE              hChildStdoutRd, hChildStdoutWr;
 
-                si.cb      = sizeof(si);
-                si.dwFlags = STARTF_USESHOWWINDOW; // These flags are necessarry to stop
-                                                   // a terminal window popping up as it
-                si.wShowWindow = SW_HIDE;          // runs the command
+                sa.nLength              = sizeof(sa);
+                sa.bInheritHandle       = TRUE;
+                sa.lpSecurityDescriptor = NULL;
+
+                if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &sa, 0) ||
+                    !SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0))
+                {
+                    fprintf(stderr, "Failed to create pipes.");
+                    xassert(false);
+                    return -1;
+                }
+
+                si.cb          = sizeof(si);
+                si.dwFlags    |= STARTF_USESHOWWINDOW; // Stops a terminal window popping up as it runs the command
+                si.hStdOutput  = hChildStdoutWr;
+                si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
 
                 UINT64 buildStart = GetNowNS();
                 // Run build command in child process.
-                WCHAR cmdbuf[256];
+                WCHAR cmdbuf[512];
                 DWORD exitCode = 0;
                 wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf), TEXT(HOTRELOAD_BUILD_COMMAND));
-                if (!CreateProcessW(0, cmdbuf, 0, 0, FALSE, CREATE_NEW_CONSOLE, 0, 0, &si, &pi))
+                if (!CreateProcessW(0, cmdbuf, 0, 0, TRUE, 0, NULL, NULL, &si, &pi))
                 {
                     fprintf(stderr, "CreateProcess failed (%lu).\n", GetLastError());
                     return 1;
@@ -141,12 +153,22 @@ int main(int argc, char* argv[])
 
                 // Wait until child process exits
                 WaitForSingleObject(pi.hProcess, INFINITE);
+
+                char  buffer[4096] = {0};
+                DWORD bytesRead    = 0;
+                do
+                {
+                    BOOL ok = ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
+                    if (ok)
+                        fwrite(buffer, 1, bytesRead, stderr);
+                }
+                while (bytesRead == sizeof(buffer) - 1);
                 GetExitCodeProcess(pi.hProcess, &exitCode);
 
-                UINT64 buildEnd = GetNowNS();
                 // Cleanup build process
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
+                CloseHandle(hChildStdoutWr);
 
                 if (exitCode != 0)
                 {
@@ -154,8 +176,7 @@ int main(int argc, char* argv[])
                 }
                 else
                 {
-                    UINT64 reloadEnd = GetNowNS();
-
+                    UINT64 buildEnd   = GetNowNS();
                     double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
                     fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
                 }
