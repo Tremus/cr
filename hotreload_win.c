@@ -66,6 +66,8 @@ int main(int argc, char* argv[])
     cr_plugin_open(&ctx, HOTRELOAD_LIB_PATH);
     // call the plugin update function with the plugin context to execute it
     // at any frequency matters to you
+
+    UINT64 last_file_change = 0; // throttle rebuild triggers
     while (true)
     {
         cr_plugin_update(&ctx, true);
@@ -79,9 +81,9 @@ int main(int argc, char* argv[])
             DWORD bytes_transferred;
             GetOverlappedResult(hDirectory, &overlapped, &bytes_transferred, TRUE);
 
-            bool                     files_changed = false;
-            FILE_NOTIFY_INFORMATION* event         = (FILE_NOTIFY_INFORMATION*)infobuffer;
+            FILE_NOTIFY_INFORMATION* event = (FILE_NOTIFY_INFORMATION*)infobuffer;
 
+            bool files_changed = false;
             while (TRUE)
             {
                 DWORD name_len = event->FileNameLength / sizeof(wchar_t);
@@ -117,69 +119,77 @@ int main(int argc, char* argv[])
             }
 
             if (files_changed)
+                last_file_change = GetNowNS();
+        }
+
+        UINT64 diff = 0;
+        if (last_file_change)
+            diff = GetNowNS() - last_file_change;
+
+        if (diff > 20000000) // 20ms throttle
+        {
+            last_file_change       = 0;
+            STARTUPINFO         si = {0};
+            PROCESS_INFORMATION pi = {0};
+            SECURITY_ATTRIBUTES sa = {0};
+            HANDLE              hChildStdoutRd, hChildStdoutWr;
+
+            sa.nLength              = sizeof(sa);
+            sa.bInheritHandle       = TRUE;
+            sa.lpSecurityDescriptor = NULL;
+
+            if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &sa, 0) ||
+                !SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0))
             {
-                STARTUPINFO         si = {0};
-                PROCESS_INFORMATION pi = {0};
-                SECURITY_ATTRIBUTES sa = {0};
-                HANDLE              hChildStdoutRd, hChildStdoutWr;
+                fprintf(stderr, "Failed to create pipes.");
+                xassert(false);
+                return -1;
+            }
 
-                sa.nLength              = sizeof(sa);
-                sa.bInheritHandle       = TRUE;
-                sa.lpSecurityDescriptor = NULL;
+            si.cb          = sizeof(si);
+            si.dwFlags    |= STARTF_USESHOWWINDOW; // Stops a terminal window popping up as it runs the command
+            si.hStdOutput  = hChildStdoutWr;
+            si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
 
-                if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &sa, 0) ||
-                    !SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0))
-                {
-                    fprintf(stderr, "Failed to create pipes.");
-                    xassert(false);
-                    return -1;
-                }
+            UINT64 buildStart = GetNowNS();
+            // Run build command in child process.
+            WCHAR cmdbuf[512];
+            DWORD exitCode = 0;
+            wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf), TEXT(HOTRELOAD_BUILD_COMMAND));
+            if (!CreateProcessW(0, cmdbuf, 0, 0, TRUE, 0, NULL, NULL, &si, &pi))
+            {
+                fprintf(stderr, "CreateProcess failed (%lu).\n", GetLastError());
+                return 1;
+            }
 
-                si.cb          = sizeof(si);
-                si.dwFlags    |= STARTF_USESHOWWINDOW; // Stops a terminal window popping up as it runs the command
-                si.hStdOutput  = hChildStdoutWr;
-                si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
+            // Wait until child process exits
+            WaitForSingleObject(pi.hProcess, INFINITE);
 
-                UINT64 buildStart = GetNowNS();
-                // Run build command in child process.
-                WCHAR cmdbuf[512];
-                DWORD exitCode = 0;
-                wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf), TEXT(HOTRELOAD_BUILD_COMMAND));
-                if (!CreateProcessW(0, cmdbuf, 0, 0, TRUE, 0, NULL, NULL, &si, &pi))
-                {
-                    fprintf(stderr, "CreateProcess failed (%lu).\n", GetLastError());
-                    return 1;
-                }
+            char  buffer[4096] = {0};
+            DWORD bytesRead    = 0;
+            do
+            {
+                BOOL ok = ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
+                if (ok)
+                    fwrite(buffer, 1, bytesRead, stderr);
+            }
+            while (bytesRead == sizeof(buffer) - 1);
+            GetExitCodeProcess(pi.hProcess, &exitCode);
 
-                // Wait until child process exits
-                WaitForSingleObject(pi.hProcess, INFINITE);
+            // Cleanup build process
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            CloseHandle(hChildStdoutWr);
 
-                char  buffer[4096] = {0};
-                DWORD bytesRead    = 0;
-                do
-                {
-                    BOOL ok = ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
-                    if (ok)
-                        fwrite(buffer, 1, bytesRead, stderr);
-                }
-                while (bytesRead == sizeof(buffer) - 1);
-                GetExitCodeProcess(pi.hProcess, &exitCode);
-
-                // Cleanup build process
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                CloseHandle(hChildStdoutWr);
-
-                if (exitCode != 0)
-                {
-                    fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %lu\n", exitCode);
-                }
-                else
-                {
-                    UINT64 buildEnd   = GetNowNS();
-                    double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
-                    fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
-                }
+            if (exitCode != 0)
+            {
+                fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %lu\n", exitCode);
+            }
+            else
+            {
+                UINT64 buildEnd   = GetNowNS();
+                double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
+                fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
             }
         }
     }
