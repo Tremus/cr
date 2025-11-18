@@ -32,7 +32,7 @@ add_compile_definitions(
     HOTRELOAD_BUILD_COMMAND="cmake --build ${HOTRELOAD_BIN_PATH} --config Debug --target ${HOTRELOAD_LIB_NAME}"
     )
 
-add_executable(hotreloader hotreload_win.c)
+add_executable(hotreloader hotreload_host.c)
 if(APPLE)
     target_link_libraries(hotreloader PRIVATE "-framework CoreServices")
 endif()
