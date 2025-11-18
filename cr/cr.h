@@ -1168,11 +1168,11 @@ static int cr_plugin_main(cr_plugin* ctx, enum cr_op operation)
 
 #if defined(__linux__) || defined(__APPLE__)
 
-#include <csignal>
-#include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <setjmp.h>
+#include <signal.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
@@ -1184,12 +1184,12 @@ static int cr_plugin_main(cr_plugin* ctx, enum cr_op operation)
 #include <copyfile.h> // copyfile
 #endif
 
-using so_handle = void*;
+typedef void* so_handle;
 
-static int64_t cr_last_write_time(const std::string& path)
+static int64_t cr_last_write_time(const char* path)
 {
     struct stat stats;
-    if (stat(path.c_str(), &stats) == -1)
+    if (stat(path, &stats) == -1)
     {
         return -1;
     }
@@ -1206,14 +1206,13 @@ static int64_t cr_last_write_time(const std::string& path)
 #endif
 }
 
-static bool cr_exists(const std::string& path)
+static bool cr_exists(const char* path)
 {
-    struct stat stats
-    {};
-    return stat(path.c_str(), &stats) != -1;
+    struct stat stats = {0};
+    return stat(path, &stats) != -1;
 }
 
-static bool cr_copy(const std::string& from, const std::string& to)
+static bool cr_copy(const char* from, const char* to)
 {
 #if defined(__linux__)
     // Reference:
@@ -1237,11 +1236,11 @@ static bool cr_copy(const std::string& from, const std::string& to)
     close(output);
     return result > -1;
 #elif defined(__APPLE__)
-    return copyfile(from.c_str(), to.c_str(), NULL, COPYFILE_ALL | COPYFILE_NOFOLLOW_DST) == 0;
+    return copyfile(from, to, NULL, COPYFILE_ALL | COPYFILE_NOFOLLOW_DST) == 0;
 #endif
 }
 
-static void cr_del(const std::string& path) { unlink(path.c_str()); }
+static void cr_del(const char* path) { unlink(path); }
 
 // unix,internal
 // a helper function to validate that an area of memory is empty
@@ -1285,7 +1284,7 @@ static size_t cr_file_size(const std::string& path)
 // base = is the in file section address
 // shdr = the in file section header
 template <class H>
-void cr_elf_section_save(cr_plugin* ctx, cr_plugin_section_type::e type, int64_t vaddr, int64_t base, H shdr)
+void cr_elf_section_save(cr_plugin* ctx, CRSectionType type, int64_t vaddr, int64_t base, H shdr)
 {
     const auto   version  = CR_SECTION_VERSION_CURRENT;
     auto         p        = (cr_internal*)ctx->p;
@@ -1485,16 +1484,16 @@ typedef struct mach_header macho_hdr;
 // save section information to be used during load/unload when copying
 // around global state (from .bss and .state binary sections).
 // vaddr = is the in memory loaded address of the segment-section
-void cr_macho_section_save(cr_plugin* ctx, cr_plugin_section_type::e type, intptr_t addr, size_t size)
+void cr_macho_section_save(cr_plugin* ctx, CRSectionType type, intptr_t addr, size_t size)
 {
-    const auto   version  = CR_SECTION_VERSION_CURRENT;
-    auto         p        = (cr_internal*)ctx->p;
-    auto         data     = &p->data[type][version];
-    const size_t old_size = data->size;
-    data->base            = 0;
-    data->ptr             = (char*)addr;
-    data->size            = size;
-    data->data            = CR_REALLOC(data->data, size);
+
+    cr_internal*       p        = (cr_internal*)ctx->p;
+    cr_plugin_section* data     = &p->data[type][CR_SECTION_VERSION_CURRENT];
+    const size_t       old_size = data->size;
+    data->base                  = 0;
+    data->ptr                   = (char*)addr;
+    data->size                  = size;
+    data->data                  = CR_REALLOC(data->data, size);
     if (old_size < size)
     {
         memset((char*)data->data + old_size, '\0', size - old_size);
@@ -1508,10 +1507,10 @@ void cr_macho_section_save(cr_plugin* ctx, cr_plugin_section_type::e type, intpt
 //
 // Some useful references:
 // man 3 dyld
-static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const std::string& imagefile, bool rollback)
+static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const char* imagefile, bool rollback)
 {
-    bool result = true;
-    auto pimpl  = (cr_internal*)ctx->p;
+    bool         result = true;
+    cr_internal* pimpl  = (cr_internal*)ctx->p;
     if (pimpl->mode == CR_DISABLE)
     {
         return result;
@@ -1521,7 +1520,7 @@ static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const 
     // resolve absolute path of the image, because _dyld_get_image_name returns
     // abs path
     char imageAbsPath[PATH_MAX + 1];
-    if (!::realpath(imagefile.c_str(), imageAbsPath))
+    if (!realpath(imagefile, imageAbsPath))
     {
         CR_ASSERT(0 && "resolving absolute path for plugin failed");
         return false;
@@ -1538,7 +1537,7 @@ static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const 
             continue;
         }
 
-        const auto hdr = _dyld_get_image_header(i);
+        const struct mach_header* hdr = _dyld_get_image_header(i);
         if (hdr->filetype != MH_DYLIB)
         {
             // assure it is a valid dylib
@@ -1554,29 +1553,43 @@ static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const 
             continue;
         }
 
-        auto validate_and_save = [&](cr_plugin_section_type::e sec, intptr_t addr, unsigned long size)
-        {
-            if (addr != 0 && size != 0)
-            {
-                if (ctx->version || rollback)
-                {
-                    result &= cr_plugin_section_validate(ctx, sec, addr, 0, size);
-                }
-                if (result)
-                {
-                    cr_macho_section_save(ctx, sec, addr, size);
-                }
-            }
-        };
+        // auto validate_and_save = [&](cr_plugin_section_type::e sec, intptr_t addr, unsigned long size)
+        // {
+        //     if (addr != 0 && size != 0)
+        //     {
+        //         if (ctx->version || rollback)
+        //         {
+        //             result &= cr_plugin_section_validate(ctx, sec, addr, 0, size);
+        //         }
+        //         if (result)
+        //         {
+        //             cr_macho_section_save(ctx, sec, addr, size);
+        //         }
+        //     }
+        // };
 
-        auto          mhdr = (macho_hdr*)hdr;
+        macho_hdr*    mhdr = (macho_hdr*)hdr;
         unsigned long size = 0;
-        auto          ptr  = (intptr_t)getsectiondata(mhdr, SEG_DATA, "__bss", &size);
-        validate_and_save(CR_SECTION_TYPE_BSS, ptr, (size_t)size);
+        intptr_t      ptr  = (intptr_t)getsectiondata(mhdr, SEG_DATA, "__bss", &size);
+
+        if (ptr != 0 && size != 0)
+        {
+            if (ctx->version || rollback)
+                result &= cr_plugin_section_validate(ctx, CR_SECTION_TYPE_BSS, ptr, 0, size);
+            if (result)
+                cr_macho_section_save(ctx, CR_SECTION_TYPE_BSS, ptr, size);
+        }
+
         if (result)
         {
             ptr = (intptr_t)getsectiondata(mhdr, SEG_DATA, "__state", &size);
-            validate_and_save(CR_SECTION_TYPE_STATE, ptr, (size_t)size);
+            if (ptr != 0 && size != 0)
+            {
+                if (ctx->version || rollback)
+                    result &= cr_plugin_section_validate(ctx, CR_SECTION_TYPE_STATE, ptr, 0, size);
+                if (result)
+                    cr_macho_section_save(ctx, CR_SECTION_TYPE_STATE, ptr, size);
+            }
         }
         break;
     }
@@ -1589,7 +1602,7 @@ static bool cr_plugin_validate_sections(cr_plugin* ctx, so_handle handle, const 
 static void cr_so_unload(cr_plugin* ctx)
 {
     CR_ASSERT(ctx->p);
-    auto p = (cr_internal*)ctx->p;
+    cr_internal* p = (cr_internal*)ctx->p;
     CR_ASSERT(p->handle);
 
     const int r = dlclose(p->handle);
@@ -1602,10 +1615,10 @@ static void cr_so_unload(cr_plugin* ctx)
     p->main   = NULL;
 }
 
-static so_handle cr_so_load(const std::string& new_file)
+static so_handle cr_so_load(const char* new_file)
 {
     dlerror();
-    auto new_dll = dlopen(new_file.c_str(), RTLD_NOW);
+    void* new_dll = dlopen(new_file, RTLD_NOW);
     if (!new_dll)
     {
         CR_ERROR("Couldn't load plugin: %s\n", dlerror());
@@ -1617,7 +1630,7 @@ static cr_plugin_main_func cr_so_symbol(so_handle handle)
 {
     CR_ASSERT(handle);
     dlerror();
-    auto new_main = (cr_plugin_main_func)dlsym(handle, CR_MAIN_FUNC);
+    cr_plugin_main_func new_main = (cr_plugin_main_func)dlsym(handle, CR_MAIN_FUNC);
     if (!new_main)
     {
         CR_ERROR("Couldn't find plugin entry point: %s\n", dlerror());
@@ -1669,7 +1682,7 @@ static void cr_plat_init()
     }
 }
 
-static cr_failure cr_signal_to_failure(int sig)
+static enum cr_failure cr_signal_to_failure(int sig)
 {
     switch (sig)
     {
@@ -1684,12 +1697,13 @@ static cr_failure cr_signal_to_failure(int sig)
     case SIGABRT:
         return CR_ABORT;
     }
-    return static_cast<cr_failure>(CR_OTHER + sig);
+    return (enum cr_failure)(CR_OTHER + sig);
 }
 
-static int cr_plugin_main(cr_plugin* ctx, cr_op operation)
+static int cr_plugin_main(cr_plugin* ctx, enum cr_op operation)
 {
-    if (int sig = sigsetjmp(env, 1))
+    int sig = sigsetjmp(env, 1);
+    if (sig)
     {
         ctx->version = ctx->last_working_version;
         ctx->failure = cr_signal_to_failure(sig);
@@ -1698,11 +1712,11 @@ static int cr_plugin_main(cr_plugin* ctx, cr_op operation)
     }
     else
     {
-        auto p = (cr_internal*)ctx->p;
+        cr_internal* p = (cr_internal*)ctx->p;
         CR_ASSERT(p);
         if (p->main)
         {
-            return p->main(&ctx, operation);
+            return p->main(ctx, operation);
         }
     }
 

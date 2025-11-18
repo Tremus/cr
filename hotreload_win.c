@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include <unistd.h>
 #define UNICODE
 
 #include <stdint.h>
@@ -42,6 +44,9 @@ void my_cb(enum XFILES_WATCH_TYPE type, const char* path, void* udata)
 
 int rebuild()
 {
+    uint64_t buildStart = xtime_now_ns();
+    int exitcode = 0;
+
 #ifdef _WIN32
     STARTUPINFO         si = {0};
     PROCESS_INFORMATION pi = {0};
@@ -65,7 +70,6 @@ int rebuild()
     si.hStdOutput  = hChildStdoutWr;
     si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
 
-    UINT64 buildStart = xtime_now_ns();
     // Run build command in child process.
     WCHAR cmdbuf[512];
     DWORD exitCode = 0;
@@ -95,20 +99,21 @@ int rebuild()
     CloseHandle(pi.hThread);
     CloseHandle(hChildStdoutWr);
 
-    if (exitCode != 0)
+    exitcode = exitCode;
+#else // _WIN32
+    exitcode = system(HOTRELOAD_BUILD_COMMAND);
+#endif
+
+    if (exitcode != 0)
     {
-        fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %lu\n", exitCode);
+        fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %d\n", exitcode);
     }
     else
     {
-        UINT64 buildEnd   = xtime_now_ns();
+        uint64_t buildEnd   = xtime_now_ns();
         double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
         fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
     }
-#else // _WIN32
-#error "TODO: support current platform"
-#endif
-
     return 0;
 }
 
@@ -139,7 +144,13 @@ int main(int argc, char* argv[])
         cr_plugin_update(&ctx, true);
         fflush(stdout);
         fflush(stderr);
-        Sleep(10);
+
+        int sleep_ms = 10;
+#ifdef _WIN32
+        Sleep(sleep_ms);
+#else
+        usleep(sleep_ms * 1000);
+#endif
 
         xfiles_watch_flush(watch_ctx);
 

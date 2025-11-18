@@ -4,4 +4,5 @@ CMakeUserPresets.json
 .vs
 build
 .cache
+.DS_Store
 imgui.ini
