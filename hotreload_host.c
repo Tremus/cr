@@ -1,5 +1,4 @@
 #include <stdlib.h>
-#include <unistd.h>
 #define UNICODE
 
 #include <stdint.h>
@@ -8,6 +7,10 @@
 #include "xdebug.h"
 #include "xfiles.h"
 #include "xtime.h"
+
+#ifdef __APPLE__
+#include <unistd.h>
+#endif
 
 #define CR_ASSERT xassert
 
@@ -45,7 +48,7 @@ void my_cb(enum XFILES_WATCH_TYPE type, const char* path, void* udata)
 int rebuild()
 {
     uint64_t buildStart = xtime_now_ns();
-    int exitcode = 0;
+    int      exitcode   = 0;
 
 #ifdef _WIN32
     STARTUPINFO         si = {0};
@@ -111,7 +114,7 @@ int rebuild()
     else
     {
         uint64_t buildEnd   = xtime_now_ns();
-        double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
+        double   rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
         fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
     }
     return 0;
