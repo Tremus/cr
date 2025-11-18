@@ -11,6 +11,7 @@
 
 #define CR_HOST CR_UNSAFE // try to best manage static states
 
+#include <signal.h>
 #include <stdio.h>
 
 #include <cr.h>
@@ -39,6 +40,85 @@ void my_cb(enum XFILES_WATCH_TYPE type, const char* path, void* udata)
     }
 }
 
+int rebuild()
+{
+#ifdef _WIN32
+    STARTUPINFO         si = {0};
+    PROCESS_INFORMATION pi = {0};
+    SECURITY_ATTRIBUTES sa = {0};
+    HANDLE              hChildStdoutRd, hChildStdoutWr;
+
+    sa.nLength              = sizeof(sa);
+    sa.bInheritHandle       = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &sa, 0) ||
+        !SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0))
+    {
+        fprintf(stderr, "Failed to create pipes.");
+        xassert(false);
+        return 1;
+    }
+
+    si.cb          = sizeof(si);
+    si.dwFlags    |= STARTF_USESHOWWINDOW; // Stops a terminal window popping up as it runs the command
+    si.hStdOutput  = hChildStdoutWr;
+    si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
+
+    UINT64 buildStart = xtime_now_ns();
+    // Run build command in child process.
+    WCHAR cmdbuf[512];
+    DWORD exitCode = 0;
+    wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf), TEXT(HOTRELOAD_BUILD_COMMAND));
+    if (!CreateProcessW(0, cmdbuf, 0, 0, TRUE, 0, NULL, NULL, &si, &pi))
+    {
+        fprintf(stderr, "CreateProcess failed (%lu).\n", GetLastError());
+        return 1;
+    }
+
+    // Wait until child process exits
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    char  buffer[4096] = {0};
+    DWORD bytesRead    = 0;
+    do
+    {
+        BOOL ok = ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
+        if (ok)
+            fwrite(buffer, 1, bytesRead, stderr);
+    }
+    while (bytesRead == sizeof(buffer) - 1);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+
+    // Cleanup build process
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hChildStdoutWr);
+
+    if (exitCode != 0)
+    {
+        fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %lu\n", exitCode);
+    }
+    else
+    {
+        UINT64 buildEnd   = xtime_now_ns();
+        double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
+        fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
+    }
+#else // _WIN32
+#error "TODO: support current platform"
+#endif
+
+    return 0;
+}
+
+int  g_running = 1;
+void ctrl_c_callback(int code)
+{
+    fprintf(stderr, "Terminating\n");
+    g_running = 0;
+}
+
 int main(int argc, char* argv[])
 {
     xtime_init();
@@ -51,7 +131,10 @@ int main(int argc, char* argv[])
     // at any frequency matters to you
     xfiles_watch_context_t watch_ctx = xfiles_watch_create(HOTRELOAD_WATCH_DIR, 0, my_cb);
 
-    while (true)
+    fprintf(stderr, "Press Crtl+C to exit\n");
+    g_running = 1;
+    signal(SIGINT, ctrl_c_callback);
+    while (g_running)
     {
         cr_plugin_update(&ctx, true);
         fflush(stdout);
@@ -67,73 +150,9 @@ int main(int argc, char* argv[])
         if (diff > 20000000) // 20ms throttle
         {
             g_last_file_change = 0;
-
-#ifdef _WIN32
-            STARTUPINFO         si = {0};
-            PROCESS_INFORMATION pi = {0};
-            SECURITY_ATTRIBUTES sa = {0};
-            HANDLE              hChildStdoutRd, hChildStdoutWr;
-
-            sa.nLength              = sizeof(sa);
-            sa.bInheritHandle       = TRUE;
-            sa.lpSecurityDescriptor = NULL;
-
-            if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &sa, 0) ||
-                !SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0))
-            {
-                fprintf(stderr, "Failed to create pipes.");
-                xassert(false);
-                return -1;
-            }
-
-            si.cb          = sizeof(si);
-            si.dwFlags    |= STARTF_USESHOWWINDOW; // Stops a terminal window popping up as it runs the command
-            si.hStdOutput  = hChildStdoutWr;
-            si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
-
-            UINT64 buildStart = xtime_now_ns();
-            // Run build command in child process.
-            WCHAR cmdbuf[512];
-            DWORD exitCode = 0;
-            wcscpy_s(cmdbuf, ARRAYSIZE(cmdbuf), TEXT(HOTRELOAD_BUILD_COMMAND));
-            if (!CreateProcessW(0, cmdbuf, 0, 0, TRUE, 0, NULL, NULL, &si, &pi))
-            {
-                fprintf(stderr, "CreateProcess failed (%lu).\n", GetLastError());
-                return 1;
-            }
-
-            // Wait until child process exits
-            WaitForSingleObject(pi.hProcess, INFINITE);
-
-            char  buffer[4096] = {0};
-            DWORD bytesRead    = 0;
-            do
-            {
-                BOOL ok = ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
-                if (ok)
-                    fwrite(buffer, 1, bytesRead, stderr);
-            }
-            while (bytesRead == sizeof(buffer) - 1);
-            GetExitCodeProcess(pi.hProcess, &exitCode);
-
-            // Cleanup build process
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            CloseHandle(hChildStdoutWr);
-
-            if (exitCode != 0)
-            {
-                fprintf(stderr, "[WARNING] Rebuild failed. Exited with code: %lu\n", exitCode);
-            }
-            else
-            {
-                UINT64 buildEnd   = xtime_now_ns();
-                double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
-                fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
-            }
-#else // _WIN32
-#error "TODO: support current platform"
-#endif
+            int failed         = rebuild();
+            if (failed)
+                break;
         }
     }
 
