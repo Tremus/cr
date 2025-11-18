@@ -1,4 +1,11 @@
-#define xassert(cond) (cond) ? (void)0 : __debugbreak();
+#define UNICODE
+
+#include <stdint.h>
+#define XHL_FILES_IMPL
+#define XHL_TIME_IMPL
+#include "xdebug.h"
+#include "xfiles.h"
+#include "xtime.h"
 
 #define CR_ASSERT xassert
 
@@ -8,57 +15,33 @@
 
 #include <cr.h>
 
-BYTE infobuffer[1024 * 32];
+uint64_t g_last_file_change = 0; // throttle rebuild triggers
 
-struct
+void my_cb(enum XFILES_WATCH_TYPE type, const char* path, void* udata)
 {
-    LARGE_INTEGER freq, start;
-} g_Timer;
-
-static inline INT64 GetNowNS()
-{
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    now.QuadPart -= g_Timer.start.QuadPart;
-    INT64 q       = now.QuadPart / g_Timer.freq.QuadPart;
-    INT64 r       = now.QuadPart % g_Timer.freq.QuadPart;
-    return q * 1000000000 + r * 1000000000 / g_Timer.freq.QuadPart;
+    switch (type)
+    {
+    case XFILES_WATCH_CREATED:
+        fprintf(stderr, "Created %s\n", path);
+        break;
+    case XFILES_WATCH_DELETED:
+        fprintf(stderr, "Deleted %s\n", path);
+        break;
+    case XFILES_WATCH_MODIFIED:
+        fprintf(stderr, "Modified %s\n", path);
+        g_last_file_change = xtime_now_ns();
+        // Recompile program?
+        // Recompile shader?
+        // Note that if you are modifying files in an IDE with a linter for formatter, you will likely get multiple
+        // 'modified' callbacks. If you're hoping to recompile code, you may want to write your own throttle for
+        // whatever actions you make in response
+        break;
+    }
 }
 
 int main(int argc, char* argv[])
 {
-    QueryPerformanceFrequency(&g_Timer.freq);
-    QueryPerformanceCounter(&g_Timer.start);
-
-    HANDLE hDirectory = CreateFileW(
-        TEXT(HOTRELOAD_WATCH_DIR),
-        FILE_LIST_DIRECTORY,
-        FILE_SHARE_READ,
-        NULL,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-        NULL);
-    xassert(hDirectory);
-
-    // Setup overlapped
-    OVERLAPPED overlapped;
-    overlapped.hEvent = CreateEventW(NULL, FALSE, 0, NULL);
-
-    // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw
-    BOOL success = ReadDirectoryChangesW(
-        hDirectory,
-        infobuffer,
-        sizeof(infobuffer),
-        TRUE,
-        FILE_NOTIFY_CHANGE_LAST_WRITE,
-        NULL,
-        &overlapped,
-        NULL);
-    if (!success)
-    {
-        fprintf(stderr, "Failed to queue info buffer\n");
-        return 1;
-    }
+    xtime_init();
 
     cr_plugin ctx;
     // the host application should initalize a plugin with a context, a plugin
@@ -66,8 +49,8 @@ int main(int argc, char* argv[])
     cr_plugin_open(&ctx, HOTRELOAD_LIB_PATH);
     // call the plugin update function with the plugin context to execute it
     // at any frequency matters to you
+    xfiles_watch_context_t watch_ctx = xfiles_watch_create(HOTRELOAD_WATCH_DIR, 0, my_cb);
 
-    UINT64 last_file_change = 0; // throttle rebuild triggers
     while (true)
     {
         cr_plugin_update(&ctx, true);
@@ -75,60 +58,17 @@ int main(int argc, char* argv[])
         fflush(stderr);
         Sleep(10);
 
-        DWORD result = WaitForSingleObject(overlapped.hEvent, 0);
-        if (result == WAIT_OBJECT_0)
-        {
-            DWORD bytes_transferred;
-            GetOverlappedResult(hDirectory, &overlapped, &bytes_transferred, TRUE);
+        xfiles_watch_flush(watch_ctx);
 
-            FILE_NOTIFY_INFORMATION* event = (FILE_NOTIFY_INFORMATION*)infobuffer;
-
-            bool files_changed = false;
-            while (TRUE)
-            {
-                DWORD name_len = event->FileNameLength / sizeof(wchar_t);
-
-                if (event->Action == FILE_ACTION_MODIFIED)
-                {
-                    fwprintf(stderr, L"File changed: %.*s\n", name_len, event->FileName);
-                    files_changed = true;
-                }
-
-                // Iterate events
-                if (event->NextEntryOffset)
-                    *((BYTE**)&event) += event->NextEntryOffset;
-                else
-                    break;
-            }
-
-            // Queue next event
-            success = ReadDirectoryChangesW(
-                hDirectory,
-                infobuffer,
-                sizeof(infobuffer),
-                TRUE,
-                FILE_NOTIFY_CHANGE_LAST_WRITE,
-                NULL,
-                &overlapped,
-                NULL);
-
-            if (!success)
-            {
-                fprintf(stderr, "Failed to queue info buffer\n");
-                return 1;
-            }
-
-            if (files_changed)
-                last_file_change = GetNowNS();
-        }
-
-        UINT64 diff = 0;
-        if (last_file_change)
-            diff = GetNowNS() - last_file_change;
+        uint64_t diff = 0;
+        if (g_last_file_change)
+            diff = xtime_now_ns() - g_last_file_change;
 
         if (diff > 20000000) // 20ms throttle
         {
-            last_file_change       = 0;
+            g_last_file_change = 0;
+
+#ifdef _WIN32
             STARTUPINFO         si = {0};
             PROCESS_INFORMATION pi = {0};
             SECURITY_ATTRIBUTES sa = {0};
@@ -151,7 +91,7 @@ int main(int argc, char* argv[])
             si.hStdOutput  = hChildStdoutWr;
             si.dwFlags    |= STARTF_USESTDHANDLES; // Lets us use the stdout pipe
 
-            UINT64 buildStart = GetNowNS();
+            UINT64 buildStart = xtime_now_ns();
             // Run build command in child process.
             WCHAR cmdbuf[512];
             DWORD exitCode = 0;
@@ -187,12 +127,17 @@ int main(int argc, char* argv[])
             }
             else
             {
-                UINT64 buildEnd   = GetNowNS();
+                UINT64 buildEnd   = xtime_now_ns();
                 double rebuild_ms = (double)(buildEnd - buildStart) / 1.e6;
                 fprintf(stderr, "Rebuild time %.2fms\n", rebuild_ms);
             }
+#else // _WIN32
+#error "TODO: support current platform"
+#endif
         }
     }
+
+    xfiles_watch_destroy(watch_ctx);
 
     // at the end do not forget to cleanup the plugin context, as it needs to
     // allocate some memory to track internal and plugin states
